@@ -1,0 +1,15 @@
+# build output
+build/
+dist/
+*.user
+.vs/
+# library output of the bundled SDK projects, written next to the solution
+/Release/
+/Debug/
+/x64/
+/Win32/
+# build folders the bundled SDK projects create next to themselves
+third_party/foobar2000_sdk/**/x64/
+third_party/foobar2000_sdk/**/Win32/
+third_party/foobar2000_sdk/**/Release/
+third_party/foobar2000_sdk/**/Debug/

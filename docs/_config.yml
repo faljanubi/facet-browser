@@ -1,0 +1,24 @@
+title: Facet Browser
+description: Facets-style media library browser for 64-bit foobar2000 2.x, with dark mode.
+remote_theme: just-the-docs/just-the-docs@v0.10.1
+plugins:
+  - jekyll-remote-theme
+  - jekyll-seo-tag
+exclude:
+  - README.md
+color_scheme: dark
+search_enabled: true
+heading_anchors: true
+aux_links:
+  "GitHub": "https://github.com/faljanubi/facet-browser"
+  "Download": "https://github.com/faljanubi/facet-browser/releases/latest"
+aux_links_new_tab: true
+back_to_top: true
+back_to_top_text: "Back to top"
+footer_content: "Facet Browser © 2026 Faris Aljanubi, free software under the GNU GPL v3 or later. Not affiliated with foobar2000 or with the authors of Facets."
+gh_edit_link: true
+gh_edit_link_text: "Edit this page on GitHub"
+gh_edit_repository: "https://github.com/faljanubi/facet-browser"
+gh_edit_branch: "main"
+gh_edit_source: docs
+gh_edit_view_mode: "edit"

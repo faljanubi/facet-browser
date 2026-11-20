@@ -1,0 +1,27 @@
+Facet Browser - additional permission under GNU GPL version 3 section 7
+=======================================================================
+
+Copyright (C) 2026 Faris Aljanubi
+
+Facet Browser is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version. See the LICENSE file for the full text.
+
+Additional permission under GNU GPL version 3 section 7:
+
+If you modify this Program, or any covered work, by linking or combining it
+with the foobar2000 SDK (including pfc and libPPUI), the Windows Template
+Library (WTL), or foobar2000 itself (or modified versions of these
+libraries), containing parts covered by the terms of their respective
+licences, the licensors of this Program grant you additional permission to
+convey the resulting work. Corresponding Source for a non-source form of
+such a combination shall include the source code for the parts of this
+Program used, but need not include the source code of those libraries or
+of foobar2000.
+
+Why: Facet Browser is a foobar2000 component. It is compiled together with
+the foobar2000 SDK and WTL (which is under the Microsoft Public License, not
+compatible with the GPL on its own) and runs inside foobar2000, which is not
+open source. This permission makes sure that building and sharing the
+component stays allowed.

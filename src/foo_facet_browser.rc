@@ -1,0 +1,70 @@
+#include "resource.h"
+#include <winres.h>
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+// Preferences page (Media Library > Facet Browser). Child dialog hosted by foobar2000, which
+// sizes it to its page area; CPrefsDialog::Layout() fits the controls to that size.
+IDD_PREFS DIALOGEX 0, 0, 332, 288
+STYLE DS_SETFONT | DS_FIXEDSYS | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Columns",IDC_GRP_COLS,0,0,332,112
+    LISTBOX         IDC_COLUMNS,7,12,110,78,LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Add new",IDC_COL_ADD,7,93,38,13
+    PUSHBUTTON      "Remove",IDC_COL_REMOVE,47,93,34,13
+    PUSHBUTTON      "Up",IDC_COL_UP,83,93,16,13
+    PUSHBUTTON      "Dn",IDC_COL_DOWN,101,93,16,13
+    LTEXT           "Name:",IDC_LBL_COL_NAME,124,14,30,8
+    EDITTEXT        IDC_COL_NAME,158,12,167,13,ES_AUTOHSCROLL
+    LTEXT           "Pattern:",IDC_LBL_COL_PATTERN,124,31,30,8
+    EDITTEXT        IDC_COL_PATTERN,158,29,167,13,ES_AUTOHSCROLL
+    LTEXT           "Title formatting. %<field>% lists each value of a multi-value tag separately. The built-in Folder column shows one folder level per pane.",IDC_HELP_COLS,124,48,201,58
+
+    GROUPBOX        "Filters",IDC_GRP_FLT,0,116,332,112
+    LISTBOX         IDC_FILTERS,7,128,110,78,LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Add new",IDC_FLT_ADD,7,209,38,13
+    PUSHBUTTON      "Remove",IDC_FLT_REMOVE,47,209,34,13
+    PUSHBUTTON      "Up",IDC_FLT_UP,83,209,16,13
+    PUSHBUTTON      "Dn",IDC_FLT_DOWN,101,209,16,13
+    LTEXT           "Name:",IDC_LBL_FLT_NAME,124,130,30,8
+    EDITTEXT        IDC_FLT_NAME,158,128,167,13,ES_AUTOHSCROLL
+    LTEXT           "Query:",IDC_LBL_FLT_QUERY,124,147,30,8
+    EDITTEXT        IDC_FLT_QUERY,158,145,167,13,ES_AUTOHSCROLL
+    LTEXT           "foobar2000 query syntax, e.g. %rating% IS 5 or %added% DURING LAST 1 WEEK.",IDC_HELP_FLT,124,164,201,20
+
+    GROUPBOX        "Library selection",IDC_GRP_LIB,0,232,332,52
+    LTEXT           "Playlist:",IDC_LBL_SELPL,7,247,40,8
+    EDITTEXT        IDC_SELPL,52,245,273,13,ES_AUTOHSCROLL
+    LTEXT           "Sort pattern:",IDC_LBL_SORT,7,265,44,8
+    EDITTEXT        IDC_SORT,52,263,273,13,ES_AUTOHSCROLL
+END
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x2L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Faris Aljanubi"
+            VALUE "FileDescription", "Facet Browser - foobar2000 component"
+            VALUE "FileVersion", "1.0.0"
+            VALUE "InternalName", "foo_facet_browser"
+            VALUE "LegalCopyright", "\xa9 2026 Faris Aljanubi"
+            VALUE "OriginalFilename", "foo_facet_browser.dll"
+            VALUE "ProductName", "Facet Browser"
+            VALUE "ProductVersion", "1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
