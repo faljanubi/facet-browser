@@ -1,6 +1,6 @@
 # Facet Browser for foobar2000
 
-**Version 1.0.0** · Created by **Faris Aljanubi** · Licence: [GPL-3.0](LICENSE) · **[Documentation](https://faljanubi.github.io/facet-browser/)**
+**Version 1.0.1** · Created by **Faris Aljanubi** · Licence: [GPL-3.0](LICENSE) · **[Documentation](https://faljanubi.github.io/facet-browser/)**
 
 ![Facet Browser in foobar2000's dark mode](docs/screenshots/dark.png)
 
@@ -21,10 +21,13 @@ and colour scheme. It is an independent reimplementation and contains no code fr
 - **Columns** (right-click a pane header › *Columns*): Genre, Album artist, Artist, Date, Album,
   Track, Title, Filename, Filename.ext, Folder, or *Multiple columns* side by side. Column
   definitions are title formatting, edited in *Preferences › Media Library › Facet Browser*.
-  `%<field>%` gives one entry per value of a multi-value tag.
+  `%<field>%` gives one entry per value of a multi-value tag. `A|B` lists every track under the
+  value of `A` *and* under the value of `B` (e.g. an initial letter or decade next to each artist
+  or year), and the Default UI markers `<dim>` and `>highlight<` are shown as in the playlist view.
 - **Statistics** (header › *Statistics*): Bitrate, Duration, File created, First/Last added,
   First/Last played, First/Last release, Index, Items, Last modified, Lossless ratio, Played,
   Played duration, Rating, Subitems, Total peak, Total size. Click a header to sort by it.
+  Column widths you set are remembered per pane (header › *Columns* › *Reset column widths*).
 - **Sort by** (header › *Sort by*): sort a pane by any of its columns or by any statistic, even
   one that is not displayed, ascending or descending.
 - **Display** (header › *Display*): Columns, or Album art with bottom labels, right labels or
@@ -35,6 +38,7 @@ and colour scheme. It is an independent reimplementation and contains no code fr
 - **Actions** (toolbar button, double-click, Enter, right-click): Send to selection playlist,
   keep playing playlist · Send to selection playlist · Send to current playlist · Send to new
   playlist · Send to new autoplaylist · Add to selection playlist · Add to current playlist.
+  *Run on single click* (action button menu) runs the action whenever the selection changes.
 - Right-click items for the actions above, the standard foobar2000 track menu, **selection logic**
   (OR / AND) and the **Pane** menu (insert, append, remove, cut, copy, paste).
 - Drag items into any playlist; drag the gaps between panes to resize them.

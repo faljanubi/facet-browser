@@ -62,7 +62,6 @@ namespace fb {
 	void CArtGrid::SetColumns(const std::vector<std::pair<pfc::string8, bool>>& cols, int sortColumn, bool descending) {
 		if (!m_header.m_hWnd) return;
 		while (m_header.GetItemCount() > 0) m_header.DeleteItem(0);
-		CRect rc; GetClientRect(rc);
 		const int dpi = QueryScreenDPI(*this);
 		const int statW = MulDiv(90, dpi, 96);
 		const int n = (int)cols.size();
@@ -73,8 +72,32 @@ namespace fb {
 			item.pszText = const_cast<wchar_t*>(title.get_ptr());
 			item.fmt = (cols[i].second ? HDF_RIGHT : HDF_LEFT) | HDF_STRING;
 			if (i == sortColumn) item.fmt |= descending ? HDF_SORTDOWN : HDF_SORTUP;
-			item.cxy = cols[i].second ? statW : std::max(60, (rc.Width() - statW * (n - 1)) / std::max(1, (int)std::count_if(cols.begin(), cols.end(), [](auto& c) { return !c.second; })));
+			item.cxy = cols[i].second ? statW : 60;
 			m_header.InsertItem(i, &item);
+		}
+		FitHeader();
+	}
+
+	// Statistics columns keep their width; the other columns share the rest of the pane width.
+	// Called again on every resize, so the header always spans the whole pane.
+	void CArtGrid::FitHeader() {
+		if (!m_header.m_hWnd) return;
+		const int n = m_header.GetItemCount();
+		if (n <= 0) return;
+		CRect rc; GetClientRect(rc);
+		int used = 0, keys = 0;
+		for (int i = 0; i < n; ++i) {
+			HDITEM it = {}; it.mask = HDI_FORMAT | HDI_WIDTH; m_header.GetItem(i, &it);
+			if (it.fmt & HDF_RIGHT) used += it.cxy; else ++keys;
+		}
+		if (keys == 0) return;
+		const int each = std::max(MulDiv(40, QueryScreenDPI(*this), 96), (rc.Width() - used) / keys);
+		int left = rc.Width() - used - each * (keys - 1);
+		for (int i = 0, k = 0; i < n; ++i) {
+			HDITEM it = {}; it.mask = HDI_FORMAT | HDI_WIDTH; m_header.GetItem(i, &it);
+			if (it.fmt & HDF_RIGHT) continue;
+			it.mask = HDI_WIDTH; it.cxy = (++k == keys) ? std::max(each, left) : each;
+			m_header.SetItem(i, &it);
 		}
 	}
 
@@ -99,6 +122,7 @@ namespace fb {
 			m_header.Layout(&hl);
 			m_header.SetWindowPos(NULL, wp.x, wp.y, wp.cx, wp.cy, SWP_NOZORDER | SWP_NOACTIVATE);
 			m_headerH = wp.cy;
+			FitHeader();
 		}
 		{
 			CClientDC dc(*this);

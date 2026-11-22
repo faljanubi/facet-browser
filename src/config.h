@@ -45,6 +45,9 @@ namespace fb {
 		bool sortDescending = false;
 		int32_t sortStat = -1;               // >= 0: sort by this Stat (shown or not), overrides sortColumn
 		uint32_t weight = 1000;              // relative width
+		// column widths set by the user, in 96-DPI pixels; key: column name, or "stat:<n>" for a statistic.
+		// Columns without an entry share the free width.
+		std::vector<std::pair<pfc::string8, uint32_t>> widths;
 	};
 
 	struct BrowserConfig {
@@ -55,6 +58,7 @@ namespace fb {
 		Action action = Action::SendToSelection;
 		bool showToolbar = true;
 		bool toolbarBottom = true;
+		bool actionOnSelect = false;         // run the action whenever the selection changes (single click)
 
 		static BrowserConfig makeDefault();
 		static PaneConfig makePane(const char* column);
@@ -63,5 +67,6 @@ namespace fb {
 		void read(stream_reader_formatter<>& in);
 		static void writePane(stream_writer_formatter<>& out, const PaneConfig& p);
 		static PaneConfig readPane(stream_reader_formatter<>& in, uint32_t version);
+		static const uint32_t kVersion;
 	};
 }

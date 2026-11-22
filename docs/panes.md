@@ -43,6 +43,27 @@ each unique combination.
 A column written with `%<field>%`, like Genre's `%<genre>%`, lists each value of a multi-value
 tag separately. A track tagged *Jazz; Soul* appears under both *Jazz* and *Soul*.
 
+### Several values in one column: `|`
+
+A `|` in a column pattern lists every track under each part. `A|%<album artist>%` puts a track
+under its letter *and* under its album artist, so the pane shows group entries mixed in with
+the artists. Selecting a group entry selects everything under it. Examples:
+
+```
+<$upper($left($stripprefix(%album artist%),1))>|%<album artist>%
+    A, Abba, Adele, ... B, Beck, ...
+<$cut(%date%,3)0s>|[$year(%date%)]
+    1990, 1990s, 1991, ... 2000, 2000s, 2001, ...
+```
+
+A `|` inside a function's brackets or in `'quoted'` text is plain text.
+
+### Dim and highlight
+
+As in foobar2000's playlist view, text between `<` and `>` is drawn dimmed and text between
+`>` and `<` highlighted. Repeat them for a stronger effect (`<<<very dim>>>`). The markers are
+ignored when sorting, so the group entries above sort among the values they stand for.
+
 ## Folder column
 
 The **Folder** column shows one folder level per pane, starting from your Media Library folders.
@@ -64,6 +85,10 @@ Jazz >        | Radiohead >      | 1975 - Wish You Were... | 02 Breathe
 each row's tracks. See [Statistics](statistics) for the full list.
 
 Click a column title to sort by it; click again to reverse the order.
+
+Drag the line between two column titles to change a column's width. The pane remembers it;
+columns you haven't resized share the space left over. *Header menu › Columns › Reset column
+widths* goes back to automatic widths.
 
 ## Sort by
 

@@ -3,7 +3,8 @@
 
 namespace fb {
 
-	static const uint32_t kConfigVersion = 3;   // 3: + PaneConfig::sortStat
+	static const uint32_t kConfigVersion = 4;   // 3: + PaneConfig::sortStat; 4: + PaneConfig::widths, actionOnSelect
+	const uint32_t BrowserConfig::kVersion = kConfigVersion;
 
 	const char* statName(Stat s) {
 		static const char* names[] = {
@@ -96,6 +97,8 @@ namespace fb {
 		out << (uint32_t)p.stats.size();
 		for (auto s : p.stats) out << s;
 		out << (uint32_t)p.display << (uint32_t)p.artType << p.summary << p.andLogic << p.sortColumn << p.sortDescending << p.weight << p.sortStat;
+		out << (uint32_t)p.widths.size();
+		for (auto& w : p.widths) out << w.first << w.second;
 	}
 
 	PaneConfig BrowserConfig::readPane(stream_reader_formatter<>& in, uint32_t version) {
@@ -109,6 +112,11 @@ namespace fb {
 		uint32_t d, a;
 		in >> d >> a >> p.summary >> p.andLogic >> p.sortColumn >> p.sortDescending >> p.weight;
 		if (version >= 3) in >> p.sortStat;
+		if (version >= 4) {
+			in >> n;
+			if (n > 256) throw exception_io_data();
+			for (uint32_t i = 0; i < n; ++i) { pfc::string8 k; uint32_t w; in >> k >> w; if (w > 0 && w < 10000) p.widths.emplace_back(k, w); }
+		}
 		if (p.sortStat >= (int32_t)Stat::Count || p.sortStat == (int32_t)Stat::Index) p.sortStat = -1;
 		p.display = (Display)(d <= 3 ? d : 0);
 		p.artType = (ArtType)(a <= 3 ? a : 0);
@@ -124,7 +132,7 @@ namespace fb {
 		out << (uint32_t)source;
 		out << (uint32_t)filters.size();
 		for (auto& f : filters) out << f;
-		out << multipleFilters << (uint32_t)action << showToolbar << toolbarBottom;
+		out << multipleFilters << (uint32_t)action << showToolbar << toolbarBottom << actionOnSelect;
 	}
 
 	void BrowserConfig::read(stream_reader_formatter<>& in) {
@@ -143,5 +151,6 @@ namespace fb {
 		uint32_t a;
 		in >> multipleFilters >> a >> showToolbar >> toolbarBottom;
 		action = (Action)(a < (uint32_t)Action::Count ? a : 1);
+		if (version >= 4) in >> actionOnSelect;
 	}
 }

@@ -33,16 +33,56 @@ namespace fb {
 	}
 
 	void CPaneList::RenderSubItemText(t_size item, t_size subItem, const CRect& rc, const CRect& update, CDCHandle dc, bool allowColors) {
-		if (subItem == 0 && hasChildren && hasChildren(item)) {
-			const int arrowW = MulDiv(14, GetDPI().cx, 96);
-			CRect textRc = rc; textRc.right = std::max(textRc.left, textRc.right - arrowW);
-			__super::RenderSubItemText(item, subItem, textRc, update, dc, allowColors);
-			CRect arrow(textRc.right, rc.top, rc.right, rc.bottom);
+		const bool arrow = subItem == 0 && hasChildren && hasChildren(item);
+		CRect textRc = rc;
+		if (arrow) textRc.right = std::max(textRc.left, textRc.right - MulDiv(14, GetDPI().cx, 96));
+		const pfc::string8 markup = markupText ? markupText(item, subItem) : pfc::string8();
+		if (!markup.is_empty()) RenderMarkup(markup, subItem, GetItemTextRectHook(item, subItem, textRc), dc);
+		else __super::RenderSubItemText(item, subItem, textRc, update, dc, allowColors);
+		if (arrow) {
+			CRect a(textRc.right, rc.top, rc.right, rc.bottom);
 			dc.SetBkMode(TRANSPARENT);
-			dc.DrawText(L"›", 1, arrow, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-			return;
+			dc.DrawText(L"›", 1, a, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 		}
-		__super::RenderSubItemText(item, subItem, rc, update, dc, allowColors);
+	}
+
+	// Text with Default UI style markers, as in the playlist view: <dim> and >highlight<,
+	// stacked up to three levels (<<<very dim>>>).
+	void CPaneList::RenderMarkup(const pfc::string8& text, size_t subItem, const CRect& rc, CDCHandle dc) {
+		struct Seg { std::wstring s; int level; int width; };
+		std::vector<Seg> segs;
+		int level = 0;
+		std::string cur;
+		auto flush = [&] {
+			if (cur.empty()) return;
+			segs.push_back({ std::wstring(pfc::stringcvt::string_wide_from_utf8(cur.c_str()).get_ptr()), level, 0 });
+			cur.clear();
+		};
+		for (const char* c = text.c_str(); *c; ++c) {
+			if (*c == '<') { flush(); level--; }
+			else if (*c == '>') { flush(); level++; }
+			else cur.push_back(*c);
+		}
+		flush();
+		const COLORREF tx = dc.GetTextColor(), bk = dc.GetBkColor(), hl = GetSysColorHook(colorHighlight);
+		auto blend = [](COLORREF a, COLORREF b, int pct) {
+			return RGB((GetRValue(a) * (100 - pct) + GetRValue(b) * pct) / 100, (GetGValue(a) * (100 - pct) + GetGValue(b) * pct) / 100, (GetBValue(a) * (100 - pct) + GetBValue(b) * pct) / 100);
+		};
+		static const int dimPct[] = { 0, 30, 50, 65 }, hlPct[] = { 0, 45, 70, 100 };
+		auto colorFor = [&](int l) { return l < 0 ? blend(tx, bk, dimPct[std::min(3, -l)]) : l > 0 ? blend(tx, hl, hlPct[std::min(3, l)]) : tx; };
+		int total = 0;
+		for (auto& sg : segs) { CSize sz; dc.GetTextExtent(sg.s.c_str(), (int)sg.s.size(), &sz); sg.width = sz.cx; total += sz.cx; }
+		int x = rc.left;
+		if ((GetColumnFormat(subItem) & HDF_JUSTIFYMASK) == HDF_RIGHT && total < rc.Width()) x = rc.right - total;
+		dc.SetBkMode(TRANSPARENT);
+		for (auto& sg : segs) {
+			if (x >= rc.right) break;
+			dc.SetTextColor(colorFor(sg.level));
+			CRect r(x, rc.top, rc.right, rc.bottom);
+			dc.DrawText(sg.s.c_str(), (int)sg.s.size(), r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+			x += sg.width;
+		}
+		dc.SetTextColor(tx);
 	}
 
 	// ================================================================ element glue
@@ -151,15 +191,37 @@ namespace fb {
 		CreatePanesKeepSelection();
 	}
 
+	static bool paneUsesStat(const PaneConfig& pc, Stat s);
+
+	static bool sameSpecs(const std::vector<PaneSpec>& a, const std::vector<PaneSpec>& b) {
+		if (a.size() != b.size()) return false;
+		for (size_t i = 0; i < a.size(); ++i) {
+			if (a[i].columns.size() != b[i].columns.size()) return false;
+			for (size_t c = 0; c < a[i].columns.size(); ++c) {
+				const auto& x = a[i].columns[c], & y = b[i].columns[c];
+				if (x.folder != y.folder || x.depth != y.depth || x.pattern != y.pattern || x.markers != y.markers) return false;
+			}
+		}
+		return true;
+	}
+
 	void CFacetBrowser::CreatePanesKeepSelection() {
 		std::vector<std::vector<pfc::string8>> sel;
-		for (auto& p : m_panes) sel.push_back(p.selected);
+		std::vector<PaneSpec> oldSpecs;
+		for (auto& p : m_panes) { sel.push_back(p.selected); oldSpecs.push_back(p.spec); }
 		DestroyPanes();
 		CreatePanes();
 		for (size_t i = 0; i < m_panes.size() && i < sel.size(); ++i) m_panes[i].selected = sel[i];
 		ApplyFonts();
 		ApplyColors();
-		RebuildSource();
+		// Sorting, statistics and display changes keep the same values: regroup from the
+		// formatted model instead of reading the whole library again.
+		std::vector<PaneSpec> specs;
+		for (auto& p : m_panes) specs.push_back(p.spec);
+		bool wantCreated = false;
+		for (auto& pc : m_cfg.panes) wantCreated |= paneUsesStat(pc, Stat::FileCreated);
+		if (m_error.is_empty() && m_model.paneCount() == m_panes.size() && sameSpecs(oldSpecs, specs) && (!wantCreated || m_modelHasCreated)) Cascade(0);
+		else RebuildSource();
 		Layout();
 	}
 
@@ -181,6 +243,7 @@ namespace fb {
 					ColumnDef def;
 					if (!findColumn(name, def)) continue;   // column was removed in Preferences
 					cs.pattern = def.pattern;
+					cs.markers = patternHasMarkers(def.pattern);
 				}
 				spec.columns.push_back(cs);
 			}
@@ -218,6 +281,13 @@ namespace fb {
 				pane.list->SetSelectionModeMulti();
 				pane.list->hasChildren = [this, i](size_t row) { const FacetItem* it = RowItem(i, row); return it && it->hasChildren; };
 				pane.list->isSplitterZone = [this](CPoint pt) { return InSplitterZone(pt); };
+				CPaneList* list = pane.list.get();
+				pane.list->columnResized = [this, list](int col) { if (col >= 0) PostMessage(WM_FB_COLUMN_RESIZED, (WPARAM)col, (LPARAM)list); };
+				pane.list->markupText = [this, i](size_t row, size_t col) -> pfc::string8 {
+					if (i >= m_panes.size() || col >= m_panes[i].spec.columns.size() || !m_panes[i].spec.columns[col].markers) return "";
+					pfc::string8 t = CellText(i, row, col);
+					return (strchr(t, '<') || strchr(t, '>')) ? t : pfc::string8();
+				};
 			}
 			UpdateColumns(i);
 		}
@@ -246,9 +316,11 @@ namespace fb {
 		if (!pane.list) return;
 		auto& list = *pane.list;
 		if (list.IsHeaderEnabled()) list.ResetColumns(false);
+		else list.InitializeHeaderCtrlSortable();   // HDS_BUTTONS: without it the header sends no clicks
 		for (size_t c = 0; c < cols.size(); ++c) {
 			uint32_t w = 100;
-			if (cols[c].second) {
+			if (int saved = SavedWidth(i, c)) w = (uint32_t)saved;
+			else if (cols[c].second) {
 				const Stat st = (Stat)pc.stats[c - pane.spec.columns.size()];
 				const char* sample = "00000";
 				switch (st) {
@@ -310,6 +382,28 @@ namespace fb {
 		return m_editBrush;
 	}
 
+	// The search history drop-down (the combo's list box) asks its parent for colours too.
+	HBRUSH CFacetBrowser::OnCtlColorListBox(CDCHandle dc, CListBox) {
+		dc.SetTextColor(m_callback->query_std_color(ui_color_text));
+		dc.SetBkColor(m_callback->query_std_color(ui_color_background));
+		return m_editBrush;
+	}
+
+	// Height of the search combo including its drop-down: as many rows as the history has
+	// (at most 12), so the list never opens as a big empty box.
+	int CFacetBrowser::SearchDropHeight(int editH) {
+		const int count = m_search.m_hWnd ? m_search.GetCount() : 0;
+		const int rows = std::min(count, 12);
+		if (m_search.m_hWnd) m_search.SetMinVisible(std::max(1, rows));
+		const int itemH = m_search.m_hWnd ? std::max(1, (int)m_search.GetItemHeight(0)) : editH;
+		return editH + itemH * rows + 2;
+	}
+
+	void CFacetBrowser::OnSearchDropDown(UINT, int, CWindow) {
+		// nothing in the history: don't show an empty list
+		if (m_search.GetCount() == 0) m_search.PostMessage(CB_SHOWDROPDOWN, FALSE);
+	}
+
 	BOOL CFacetBrowser::OnEraseBkgnd(CDCHandle dc) {
 		CRect rc; GetClientRect(rc);
 		dc.FillSolidRect(rc, m_callback->query_std_color(ui_color_background));
@@ -365,17 +459,25 @@ namespace fb {
 				return sz.cx + MulDiv(extra, dpi, 96);
 			};
 			const int wSource = textW(m_btnSource, 28), wFilter = textW(m_btnFilter, 28);
-			const int wAction = textW(m_btnAction, 44), wHelp = MulDiv(26, dpi, 96);
+			int wAction = textW(m_btnAction, 44);
+			const int wHelp = MulDiv(26, dpi, 96);
 			dc.SelectFont(old);
+			// Narrow panel: the action button gives up width first (its label gets an ellipsis),
+			// so the search box keeps a usable size and nothing overlaps.
+			{
+				const int minSearch = MulDiv(80, dpi, 96), minAction = MulDiv(44, dpi, 96);
+				const int room = bar.Width() - wSource - wFilter - wHelp - 4 * m_gap - minSearch;
+				if (wAction > room) wAction = std::max(minAction, room);
+			}
 			int x = bar.left;
 			m_btnSource.SetWindowPos(NULL, x, bar.top, wSource, bar.Height(), SWP_NOZORDER | SWP_NOACTIVATE); x += wSource + m_gap;
 			m_btnFilter.SetWindowPos(NULL, x, bar.top, wFilter, bar.Height(), SWP_NOZORDER | SWP_NOACTIVATE); x += wFilter + m_gap;
 			int right = bar.right;
 			m_btnHelp.SetWindowPos(NULL, right - wHelp, bar.top, wHelp, bar.Height(), SWP_NOZORDER | SWP_NOACTIVATE); right -= wHelp + m_gap;
 			m_btnAction.SetWindowPos(NULL, right - wAction, bar.top, wAction, bar.Height(), SWP_NOZORDER | SWP_NOACTIVATE); right -= wAction + m_gap;
-			m_search.SetWindowPos(NULL, x, bar.top, std::max(40, right - x), bar.Height() * 12, SWP_NOZORDER | SWP_NOACTIVATE);
+			m_search.SetWindowPos(NULL, x, bar.top, std::max(40, right - x), SearchDropHeight(bar.Height()), SWP_NOZORDER | SWP_NOACTIVATE);
 			CRect cr; m_search.GetWindowRect(cr);
-			m_search.SetWindowPos(NULL, x, bar.top + (bar.Height() - cr.Height()) / 2, std::max(40, right - x), bar.Height() * 12, SWP_NOZORDER | SWP_NOACTIVATE);
+			m_search.SetWindowPos(NULL, x, bar.top + (bar.Height() - cr.Height()) / 2, std::max(40, right - x), SearchDropHeight(bar.Height()), SWP_NOZORDER | SWP_NOACTIVATE);
 		}
 
 		const size_t n = m_panes.size();
@@ -407,10 +509,43 @@ namespace fb {
 		if (!p.list) return;
 		CRect lr; p.list->GetClientRect(lr);
 		const size_t keys = p.spec.columns.size(), total = keys + m_cfg.panes[i].stats.size();
-		int stats = 0;
-		for (size_t c = keys; c < total; ++c) stats += p.list->GetHeaderItemWidth((int)c);
-		int each = (lr.Width() - stats) / (int)std::max<size_t>(1, keys);
-		if (each > 20) for (size_t c = 0; c < keys; ++c) p.list->ResizeColumn(c, each, c + 1 == keys);
+		int fixed = 0;
+		std::vector<size_t> free;
+		for (size_t c = 0; c < total; ++c) {
+			if (c < keys && SavedWidth(i, c) == 0) free.push_back(c);
+			else fixed += p.list->GetHeaderItemWidth((int)c);
+		}
+		if (free.empty()) return;
+		int each = (lr.Width() - fixed) / (int)free.size();
+		if (each > 20) for (size_t k = 0; k < free.size(); ++k) p.list->ResizeColumn(free[k], each, k + 1 == free.size());
+	}
+
+	pfc::string8 CFacetBrowser::WidthKey(const PaneConfig& pc, const PaneSpec& spec, size_t col) {
+		if (col < spec.columns.size()) return spec.columns[col].name;
+		const size_t s = col - spec.columns.size();
+		return s < pc.stats.size() ? pfc::string8(PFC_string_formatter() << "stat:" << pc.stats[s]) : pfc::string8();
+	}
+
+	int CFacetBrowser::SavedWidth(size_t i, size_t col) const {
+		if (i >= m_panes.size() || !m_panes[i].list) return 0;
+		const auto& pc = m_cfg.panes[i];
+		const pfc::string8 key = WidthKey(pc, m_panes[i].spec, col);
+		for (auto& w : pc.widths) if (w.first == key) return MulDiv((int)w.second, m_panes[i].list->GetDPI().cx, 96);
+		return 0;
+	}
+
+	LRESULT CFacetBrowser::OnColumnResized(UINT, WPARAM col, LPARAM list) {
+		const size_t i = PaneIndex(reinterpret_cast<const void*>(list));
+		if (i >= m_panes.size() || !m_panes[i].list) return 0;
+		auto& pc = m_cfg.panes[i];
+		const pfc::string8 key = WidthKey(pc, m_panes[i].spec, (size_t)col);
+		if (key.is_empty()) return 0;
+		const int px = m_panes[i].list->GetHeaderItemWidth((int)col);
+		const uint32_t w = (uint32_t)std::max(1, MulDiv(px, 96, m_panes[i].list->GetDPI().cx));
+		bool found = false;
+		for (auto& e : pc.widths) if (e.first == key) { e.second = w; found = true; }
+		if (!found) pc.widths.emplace_back(key, w);
+		return 0;
 	}
 
 	int CFacetBrowser::SplitterAt(CPoint pt) const {
@@ -470,6 +605,7 @@ namespace fb {
 		if (id == kFreePanesTimer) { FreeDeadPanes(); return; }
 		KillTimer(id);
 		if (id == TIMER_REBUILD || id == TIMER_SEARCH) RebuildSource();
+		else if (id == TIMER_SELECT_ACTION && m_selectActionPane < m_panes.size()) RunToolbarAction(m_selectActionPane);
 	}
 
 	static COLORREF mixColor(COLORREF a, COLORREF b, int pct) {
@@ -642,8 +778,13 @@ namespace fb {
 			desc.Set(1 + a, actionDescription((Action)a));
 		}
 		menu.CheckMenuRadioItem(1, (UINT)Action::Count, 1 + (UINT)m_cfg.action, MF_BYCOMMAND);
+		enum { kSingleClick = 100 };
+		menu.AppendMenu(MF_SEPARATOR);
+		menu.AppendMenu(MF_STRING | (m_cfg.actionOnSelect ? MF_CHECKED : 0), kSingleClick, L"Run on single click");
+		desc.Set(kSingleClick, "Runs the action whenever the selection changes, not only on double-click or Enter. Does not apply to the new playlist actions.");
 		int cmd = menu.TrackPopupMenuEx(TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_RIGHTALIGN, r.right, m_cfg.toolbarBottom ? r.top : r.bottom, desc, nullptr);
-		if (cmd > 0) { m_cfg.action = (Action)(cmd - 1); UpdateToolbarText(); }
+		if (cmd == kSingleClick) m_cfg.actionOnSelect = !m_cfg.actionOnSelect;
+		else if (cmd > 0) { m_cfg.action = (Action)(cmd - 1); UpdateToolbarText(); }
 		return 0;
 	}
 
@@ -664,6 +805,7 @@ namespace fb {
 		for (auto& s : h) m_search.AddString(pfc::stringcvt::string_wide_from_utf8(s));
 		if (!h.empty()) m_search.AddString(L"Wipe history");
 		m_search.SetWindowText(cur);
+		Layout();   // the drop-down height follows the number of entries
 	}
 
 	void CFacetBrowser::OnSearchPick(UINT, int, CWindow) {
@@ -783,6 +925,7 @@ namespace fb {
 		for (auto& p : m_panes) specs.push_back(p.spec);
 		bool wantCreated = false;
 		for (auto& pc : m_cfg.panes) wantCreated |= paneUsesStat(pc, Stat::FileCreated);
+		m_modelHasCreated = wantCreated;
 		if (!m_model.build(tracks, specs, wantCreated, m_error)) {
 			for (size_t i = 0; i < m_panes.size(); ++i) { m_panes[i].items.clear(); m_panes[i].input.clear(); m_panes[i].output.clear(); RefreshPaneUI(i); }
 			Invalidate();
@@ -898,12 +1041,22 @@ namespace fb {
 		}
 	}
 
+	static bool actionRunsOnSelect(Action a) {
+		// creating a playlist on every click would flood the playlist tabs
+		return a != Action::SendToNew && a != Action::SendToNewAutoplaylist;
+	}
+
 	void CFacetBrowser::OnPaneSelectionChanged(size_t i) {
 		if (m_updating || i >= m_panes.size()) return;
 		m_lastPane = i;
 		ReadSelectionFromUI(i);
 		Cascade(i, false);
 		if (i + 1 < m_panes.size()) Cascade(i + 1);
+		if (m_cfg.actionOnSelect && actionRunsOnSelect(m_cfg.action)) {
+			// short delay: arrow-key and drag selections settle before the playlist is filled
+			m_selectActionPane = i;
+			SetTimer(TIMER_SELECT_ACTION, 150);
+		}
 	}
 
 	void CFacetBrowser::OnHeaderClick(size_t pane, size_t col) {
@@ -971,7 +1124,11 @@ namespace fb {
 		std::vector<pfc::string8> lines;
 		if (pane >= m_panes.size()) return lines;
 		const size_t total = m_panes[pane].spec.columns.size() + m_cfg.panes[pane].stats.size();
-		for (size_t c = 0; c < total; ++c) lines.push_back(CellText(pane, row, c));
+		const auto& spec = m_panes[pane].spec;
+		for (size_t c = 0; c < total; ++c) {
+			pfc::string8 t = CellText(pane, row, c);
+			lines.push_back(c < spec.columns.size() && spec.columns[c].markers ? stripMarkers(t) : t);
+		}
 		return lines;
 	}
 
@@ -988,7 +1145,9 @@ namespace fb {
 	pfc::string8 CFacetBrowser::listGetSubItemText(ctx_t ctx, size_t item, size_t sub) {
 		size_t i = PaneIndex(ctx);
 		if (i >= m_panes.size()) return "";
-		return CellText(i, item, sub);
+		pfc::string8 t = CellText(i, item, sub);
+		if (sub < m_panes[i].spec.columns.size() && m_panes[i].spec.columns[sub].markers) t = stripMarkers(t);
+		return t;
 	}
 
 	void CFacetBrowser::listSelChanged(ctx_t ctx) { OnPaneSelectionChanged(PaneIndex(ctx)); }
@@ -1015,7 +1174,7 @@ namespace fb {
 		CMD_LOGIC_OR = 20, CMD_LOGIC_AND,
 		CMD_PANE_INSERT = 30, CMD_PANE_APPEND, CMD_PANE_REMOVE, CMD_PANE_CUT, CMD_PANE_COPY, CMD_PANE_PASTE,
 		CMD_SHOW_TOOLBAR = 40, CMD_TOOLBAR_BOTTOM,
-		CMD_COL_MULTI = 50, CMD_COL_PREFS,
+		CMD_COL_MULTI = 50, CMD_COL_PREFS, CMD_COL_RESET_WIDTHS,
 		CMD_DISPLAY = 60,               // + Display
 		CMD_SUMMARY = 70,
 		CMD_ART = 80,                   // + ArtType
@@ -1047,6 +1206,8 @@ namespace fb {
 		mCols.AppendMenu(MF_SEPARATOR);
 		mCols.AppendMenu(MF_STRING | (pc.columns.size() > 1 ? MF_CHECKED : 0), CMD_COL_MULTI, L"Multiple columns");
 		desc.Set(CMD_COL_MULTI, "Toggles multiple columns.");
+		mCols.AppendMenu(MF_STRING | (pc.widths.empty() ? MF_GRAYED : 0), CMD_COL_RESET_WIDTHS, L"Reset column widths");
+		desc.Set(CMD_COL_RESET_WIDTHS, "Forgets the column widths set in this pane; the columns share the width again.");
 		mCols.AppendMenu(MF_SEPARATOR);
 		mCols.AppendMenu(MF_STRING, CMD_COL_PREFS, L"Preferences");
 		desc.Set(CMD_COL_PREFS, "Displays column preferences.");
@@ -1141,6 +1302,8 @@ namespace fb {
 				pc.columns.push_back(next);
 			}
 			keepSort();
+		} else if (cmd == CMD_COL_RESET_WIDTHS) {
+			pc.widths.clear();
 		} else if (cmd == CMD_COL_PREFS) {
 			showPreferences();
 			return false;
@@ -1359,7 +1522,7 @@ namespace fb {
 			try {
 				auto cfg = ui_element_config::g_create(guid_element, p, size);
 				ui_element_config_parser in(cfg);
-				PaneConfig pane = BrowserConfig::readPane(in, 3);   // clipboard data is always written in the current format
+				PaneConfig pane = BrowserConfig::readPane(in, BrowserConfig::kVersion);   // clipboard data is always written in the current format
 				GlobalUnlock(h);
 				CloseClipboard();
 				InsertPane(at, pane);
@@ -1386,7 +1549,7 @@ namespace fb {
 		pfc::string8 s;
 		for (size_t k = 0; k < p.selected.size() && k < 3; ++k) {
 			if (k) s << ", ";
-			pfc::string8 v = p.selected[k]; v.replace_char('\x02', ' ');
+			pfc::string8 v = stripMarkers(p.selected[k]); v.replace_char('\x02', ' ');
 			s << v;
 		}
 		if (p.selected.size() > 3) s << ", ...";
@@ -1432,6 +1595,35 @@ namespace fb {
 		return out;
 	}
 
+	// Condition matching the tracks a column pattern lists under this value; "" if it can't be expressed.
+	static pfc::string8 patternCondition(const char* pattern, const pfc::string8& value) {
+		const auto pieces = splitPipe(pattern);
+		if (pieces.size() > 1) {
+			// "A|B": a track is listed under the value when either piece gives it
+			pfc::string8 out;
+			for (auto& piece : pieces) {
+				pfc::string8 c = patternCondition(piece, value);
+				if (c.is_empty()) return "";
+				if (!out.is_empty()) out << " OR ";
+				out << "( " << c << " )";
+			}
+			return out;
+		}
+		pfc::string8 out;
+		const char* lt = strstr(pattern, "%<");
+		const char* gt = lt ? strstr(lt + 2, ">%") : nullptr;
+		if (lt && gt) {
+			// multi-value column: the item matches any value of the field
+			const pfc::string8 field(lt + 2, gt - (lt + 2));
+			if (value == missingValue(pattern)) out << field << " MISSING";
+			else out << isCondition(field, value);
+		} else if (!strchr(pattern, '"')) {
+			// compare the formatted pattern; the trailing | keeps empty values comparable
+			out << isCondition(PFC_string_formatter() << "\"" << pattern << "|\"", PFC_string_formatter() << value << "|");
+		}
+		return out;
+	}
+
 	// Query describing the selection of the panes up to and including this one, plus the active
 	// filters and the search (for "Send to new autoplaylist"). It matches the same tracks the pane
 	// shows, as long as the source is the Media Library.
@@ -1465,19 +1657,7 @@ namespace fb {
 						}
 						if (prefixes.empty()) one << "%path% HAS \"\\" << parts[c] << "\\\"";   // fallback: that folder name anywhere
 						else for (auto& pre : prefixes) { if (!one.is_empty()) one << " OR "; one << "%path% HAS \"" << pre << "\""; }
-					} else {
-						const char* lt = strstr(cs.pattern, "%<");
-						const char* gt = lt ? strstr(lt + 2, ">%") : nullptr;
-						if (lt && gt) {
-							// multi-value column: the item matches any value of the field
-							const pfc::string8 field(lt + 2, gt - (lt + 2));
-							if (parts[c] == missingValue(cs.pattern)) one << field << " MISSING";
-							else one << isCondition(field, parts[c]);
-						} else if (!strchr(cs.pattern, '"')) {
-							// compare the formatted pattern; the trailing | keeps empty values comparable
-							one << isCondition(PFC_string_formatter() << "\"" << cs.pattern << "|\"", PFC_string_formatter() << parts[c] << "|");
-						}
-					}
+					} else one = patternCondition(cs.pattern, parts[c]);
 					if (one.is_empty()) continue;
 					if (!cond.is_empty()) cond << " AND ";
 					cond << "( " << one << " )";
@@ -1510,8 +1690,17 @@ namespace fb {
 		switch (a) {
 		case Action::SendToSelection:
 		case Action::SendToSelectionKeepPlaying: {
+			const pfc::string8 playingName = PFC_string_formatter() << selName << " (playing)";
 			size_t idx = pm->find_or_create_playlist(selName);
 			if (locked(idx)) return;
+			if (a == Action::SendToSelectionKeepPlaying && idx == pm->get_playing_playlist()) {
+				// Like the Library Viewer: the playing selection is kept as "<name> (playing)" so
+				// playback carries on through it, and a fresh selection playlist takes its place.
+				size_t old = pm->find_playlist(playingName);
+				if (old != pfc_infinite && old != idx) { pm->remove_playlist(old); if (old < idx) --idx; }
+				pm->playlist_rename(idx, playingName, pfc_infinite);
+				idx = pm->create_playlist(selName, pfc_infinite, idx);
+			}
 			// "keep playing": just don't restart playback; the current track plays on and the
 			// playing playlist stays what it was
 			pm->playlist_undo_backup(idx);
@@ -1522,6 +1711,9 @@ namespace fb {
 				pm->playlist_set_focus_item(idx, 0);
 				pm->set_playing_playlist(idx);
 				playback_control::get()->start(playback_control::track_command_settrack);
+				// playback moved back to the selection playlist: the old "(playing)" copy is done
+				size_t old = pm->find_playlist(playingName);
+				if (old != pfc_infinite && old != pm->get_playing_playlist()) pm->remove_playlist(old);
 			}
 			break;
 		}

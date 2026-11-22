@@ -11,6 +11,7 @@ namespace fb {
 		pfc::string8 name;
 		pfc::string8 pattern;   // title formatting; unused for folder columns
 		bool folder = false;
+		bool markers = false;   // pattern writes Default UI dim/highlight markers (<dim> >highlight<)
 		uint32_t depth = 0;     // folder level (1 = first folder inside the Media Library folder)
 	};
 
@@ -76,6 +77,7 @@ namespace fb {
 			std::unordered_map<std::string, uint32_t> lookup;
 			std::vector<uint32_t> offsets, ids;              // per track: value ids
 			std::vector<char> deeper;                        // per track: has folders below this pane's level
+			std::vector<char> markers;                       // per column: values carry dim/highlight markers
 		};
 		uint32_t intern(PaneValues& p, const std::vector<pfc::string8>& parts);
 		void accumulate(FacetItem& it, uint32_t t) const;
@@ -86,6 +88,11 @@ namespace fb {
 	};
 
 	pfc::string8 expandMultiValue(const char* pattern);
+	// A column pattern split at its top-level "|" (outside function arguments and 'quoted' text).
+	std::vector<pfc::string8> splitPipe(const char* pattern);
+	// Whether a pattern writes literal < or > (Default UI dim/highlight markers), not counting %<field>%.
+	bool patternHasMarkers(const char* pattern);
+	pfc::string8 stripMarkers(const char* s);
 	// A track's path up to and including its folder at this Folder-column level ("F:\Music\Rock\"), or "".
 	pfc::string8 folderPrefix(const metadb_handle_ptr& h, uint32_t depth);
 	extern const char kValueSep;

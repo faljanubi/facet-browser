@@ -65,6 +65,7 @@ namespace fb {
 		bool IsSelected(size_t idx) const { return idx < m_sel.size() && m_sel[idx]; }
 
 	private:
+		void FitHeader();
 		enum { WM_ART_LOADED = WM_APP + 41 };
 		struct Result { uint32_t generation; size_t index; HBITMAP bmp; };
 

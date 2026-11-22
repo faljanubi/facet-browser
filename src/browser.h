@@ -15,9 +15,13 @@ namespace fb {
 		std::function<bool(size_t)> hasChildren;   // draw "›" on row
 		std::function<bool(size_t)> isSummary;     // row is the "All (...)" item
 		std::function<bool(CPoint)> isSplitterZone;   // screen point is on/next to a pane divider
+		std::function<void(int)> columnResized;      // the user dragged or double-clicked a column divider
+		std::function<pfc::string8(size_t, size_t)> markupText;   // cell text with dim/highlight markers, or "" to draw normally
 		typedef CListControlFb2kColorsUIElem<CListControlOwnerData> TBase;
 		BEGIN_MSG_MAP_EX(CPaneList)
 			MSG_WM_NCHITTEST(OnNcHitTest)
+			NOTIFY_CODE_HANDLER_EX(HDN_ENDTRACKW, OnHeaderResized)
+			NOTIFY_CODE_HANDLER_EX(HDN_DIVIDERDBLCLICKW, OnHeaderResized)
 			NOTIFY_CODE_HANDLER_EX(NM_CUSTOMDRAW, OnHeaderDraw)
 			CHAIN_MSG_MAP(TBase)
 		END_MSG_MAP()
@@ -26,6 +30,12 @@ namespace fb {
 		// Let the parent handle the mouse right next to a divider, so the thin line is easy to grab.
 		LRESULT OnNcHitTest(CPoint pt) { if (isSplitterZone && isSplitterZone(pt)) return HTTRANSPARENT; SetMsgHandled(FALSE); return 0; }
 		LRESULT OnHeaderDraw(LPNMHDR hdr);
+		LRESULT OnHeaderResized(LPNMHDR hdr) {
+			if (columnResized) columnResized(reinterpret_cast<LPNMHEADER>(hdr)->iItem);
+			SetMsgHandled(FALSE);   // libPPUI still applies the change
+			return 0;
+		}
+		void RenderMarkup(const pfc::string8& text, size_t subItem, const CRect& rc, CDCHandle dc);
 	};
 
 	// Repaints the dividers between column titles in foobar2000's dark frame colour (#646464).
@@ -73,13 +83,16 @@ namespace fb {
 			MSG_WM_MOUSEMOVE(OnMouseMove)
 			MSG_WM_SETCURSOR(OnSetCursor)
 			MSG_WM_CTLCOLOREDIT(OnCtlColorEdit)
+			MSG_WM_CTLCOLORLISTBOX(OnCtlColorListBox)
 			MESSAGE_HANDLER_EX(WM_FB_PANE_COMMAND, OnPaneCommand)
+			MESSAGE_HANDLER_EX(WM_FB_COLUMN_RESIZED, OnColumnResized)
 			COMMAND_HANDLER_EX(IDC_SOURCE, BN_CLICKED, OnSourceButton)
 			COMMAND_HANDLER_EX(IDC_FILTER, BN_CLICKED, OnFilterButton)
 			COMMAND_HANDLER_EX(IDC_ACTION, BN_CLICKED, OnActionButton)
 			COMMAND_HANDLER_EX(IDC_HELPBTN, BN_CLICKED, OnHelpButton)
 			COMMAND_HANDLER_EX(IDC_SEARCH, CBN_EDITCHANGE, OnSearchChange)
 			COMMAND_HANDLER_EX(IDC_SEARCH, CBN_SELENDOK, OnSearchPick)
+			COMMAND_HANDLER_EX(IDC_SEARCH, CBN_DROPDOWN, OnSearchDropDown)
 			NOTIFY_HANDLER_EX(IDC_ACTION, BCN_DROPDOWN, OnActionDropDown)
 			NOTIFY_CODE_HANDLER_EX(NM_CUSTOMDRAW, OnButtonCustomDraw)
 		ALT_MSG_MAP(2) // search combo: repaint its frame in the border colour
@@ -93,9 +106,14 @@ namespace fb {
 	private:
 		friend class FacetBrowserElement;
 		enum { IDC_SOURCE = 1001, IDC_FILTER, IDC_SEARCH, IDC_ACTION, IDC_HELPBTN, IDC_PANE0 = 1100 };
-		enum { TIMER_REBUILD = 1, TIMER_SEARCH = 2 };
+		enum { TIMER_REBUILD = 1, TIMER_SEARCH = 2, TIMER_SELECT_ACTION = 3 };
 		// Pane shortcuts (Ctrl+X/C/V) run from a posted message, after the pane's own WM_KEYDOWN has returned.
 		enum { WM_FB_PANE_COMMAND = WM_APP + 42 };
+		// A column divider was dragged (wParam: column, lParam: the pane's list); read the width once libPPUI has applied it.
+		enum { WM_FB_COLUMN_RESIZED = WM_APP + 43 };
+		LRESULT OnColumnResized(UINT, WPARAM col, LPARAM list);
+		static pfc::string8 WidthKey(const PaneConfig& pc, const PaneSpec& spec, size_t col);
+		int SavedWidth(size_t pane, size_t col) const;   // pixels at the list's DPI, 0 = not set
 		bool PaneKeyDown(size_t pane, UINT ch);
 		LRESULT OnPaneCommand(UINT, WPARAM cmd, LPARAM pane);
 
@@ -152,6 +170,9 @@ namespace fb {
 		void OnMouseMove(UINT, CPoint pt);
 		BOOL OnSetCursor(CWindow wnd, UINT hit, UINT msg);
 		HBRUSH OnCtlColorEdit(CDCHandle dc, CEdit);
+		HBRUSH OnCtlColorListBox(CDCHandle dc, CListBox);
+		int SearchDropHeight(int editH);
+		void OnSearchDropDown(UINT, int, CWindow);
 
 		// toolbar
 		void OnSourceButton(UINT, int, CWindow);
@@ -248,6 +269,8 @@ namespace fb {
 		void ScheduleRebuild() { if (m_hWnd) SetTimer(TIMER_REBUILD, 400); }
 		void globalsChanged(const GlobalsChange& change) override;
 		void CreatePanesKeepSelection();
+		bool m_modelHasCreated = false;   // the model was built with file creation times
+		size_t m_selectActionPane = 0;
 
 		ui_element_instance_callback::ptr m_callback;
 		BrowserConfig m_cfg;

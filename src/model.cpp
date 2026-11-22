@@ -7,9 +7,9 @@ namespace fb {
 	static const char kInfoSep = '\x1f';   // between fields of the statistics script
 	static const char kPartSep = '\x02';   // between columns of a multi-column key
 
-	pfc::string8 expandMultiValue(const char* pattern) {
-		// %<name>% means "one entry per value" (as in Facets); map it to $meta_sep with a
-		// separator that is split again after formatting.
+	// %<name>% means "one entry per value" (as in Facets); map it to $meta_sep with a
+	// separator that is split again after formatting.
+	static pfc::string8 expandFields(const char* pattern) {
 		pfc::string8 out;
 		const char* p = pattern;
 		while (*p) {
@@ -26,6 +26,54 @@ namespace fb {
 			}
 			out.add_byte(*p++);
 		}
+		return out;
+	}
+
+	std::vector<pfc::string8> splitPipe(const char* pattern) {
+		std::vector<pfc::string8> out;
+		pfc::string8 cur;
+		int depth = 0;
+		bool quoted = false;
+		for (const char* p = pattern; *p; ++p) {
+			const char c = *p;
+			if (c == '\'') quoted = !quoted;   // '' (an escaped quote) toggles twice
+			else if (!quoted) {
+				if (c == '(') depth++;
+				else if (c == ')' && depth > 0) depth--;
+				else if (c == '|' && depth == 0) { out.push_back(cur); cur.reset(); continue; }
+			}
+			cur.add_byte(c);
+		}
+		out.push_back(cur);
+		return out;
+	}
+
+	pfc::string8 expandMultiValue(const char* pattern) {
+		// "A|B": every track is listed under the value of A and under the value(s) of B
+		pfc::string8 out;
+		bool first = true;
+		for (auto& piece : splitPipe(pattern)) {
+			if (!first) out.add_byte(kValueSep);
+			first = false;
+			out << expandFields(piece);
+		}
+		return out;
+	}
+
+	bool patternHasMarkers(const char* pattern) {
+		for (const char* p = pattern; *p; ++p) {
+			if (p[0] == '%' && p[1] == '<') {
+				const char* end = strstr(p + 2, ">%");
+				if (end) { p = end + 1; continue; }
+			}
+			if (*p == '<' || *p == '>') return true;
+		}
+		return false;
+	}
+
+	pfc::string8 stripMarkers(const char* s) {
+		pfc::string8 out;
+		for (const char* c = s; *c; ++c) if (*c != '<' && *c != '>') out.add_byte(*c);
 		return out;
 	}
 
@@ -150,7 +198,10 @@ namespace fb {
 		p.names.push_back(key);
 		p.parts.push_back(parts);
 		std::vector<std::wstring> sk;
-		for (auto& x : parts) sk.push_back(std::wstring(pfc::stringcvt::string_wide_from_utf8(x).get_ptr()));
+		for (size_t i = 0; i < parts.size(); ++i) {
+			const bool strip = i < p.markers.size() && p.markers[i];
+			sk.push_back(std::wstring(pfc::stringcvt::string_wide_from_utf8(strip ? stripMarkers(parts[i]) : parts[i]).get_ptr()));
+		}
 		p.sortKeys.push_back(std::move(sk));
 		p.lookup.emplace(key.c_str(), id);
 		return id;
@@ -215,6 +266,7 @@ namespace fb {
 			const auto& spec = panes[p];
 			pv.offsets.resize(n + 1);
 			pv.deeper.assign(n, 0);
+			for (auto& cs : spec.columns) pv.markers.push_back(cs.markers ? 1 : 0);
 			// map column -> index in cols
 			std::vector<int> colIndex(spec.columns.size(), -1);
 			for (size_t k = 0; k < cols.size(); ++k) if (cols[k].pane == p) colIndex[cols[k].column] = (int)k;

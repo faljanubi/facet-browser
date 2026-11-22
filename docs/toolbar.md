@@ -74,7 +74,7 @@ click the button itself. Click the **▾** part to choose a different action:
 
 | Action | Effect |
 |:--|:--|
-| Send to selection playlist, keep playing playlist | Replaces the selection playlist's content without interrupting playback |
+| Send to selection playlist, keep playing playlist | Replaces the selection playlist's content without interrupting playback. If the selection playlist is the one playing, it is kept as "Library selection (playing)" and a fresh selection playlist is made, like the Library Viewer does |
 | Send to selection playlist | Replaces the selection playlist's content and starts playing it (default) |
 | Send to current playlist | Replaces the content of the active playlist |
 | Send to new playlist | Creates a new playlist named after your selection, e.g. *Jazz, Blues* |
@@ -83,6 +83,11 @@ click the button itself. Click the **▾** part to choose a different action:
 | Add to current playlist | Adds the tracks to the end of the active playlist |
 
 All actions are in the item right-click menu too.
+
+**Run on single click** (at the bottom of the **▾** menu) runs the action every time the
+selection changes, so the selection playlist follows your clicks. It works best with *Send to
+selection playlist, keep playing playlist*, which doesn't restart playback. The *new playlist*
+and *new autoplaylist* actions still need a double-click, so a click doesn't create a playlist.
 
 - The **selection playlist** is called *Library selection* by default. You can rename it in
   [Preferences](preferences#library-selection).
