@@ -549,4 +549,19 @@ namespace fb {
 		StrFormatByteSizeW((LONGLONG)bytes, buf, 64);
 		return pfc::stringcvt::string_utf8_from_wide(buf).get_ptr();
 	}
+
+	bool FacetModel::findTrack(const metadb_handle_ptr& h, uint32_t& out) const {
+		const size_t n = m_tracks.get_count();
+		for (size_t t = 0; t < n; ++t) if (m_tracks[t] == h) { out = (uint32_t)t; return true; }
+		return false;
+	}
+
+	std::vector<uint32_t> FacetModel::trackValues(size_t pane, uint32_t track) const {
+		std::vector<uint32_t> out;
+		if (pane >= m_panes.size()) return out;
+		const auto& pv = m_panes[pane];
+		if ((size_t)track + 1 >= pv.offsets.size()) return out;
+		for (uint32_t k = pv.offsets[track]; k < pv.offsets[track + 1]; ++k) out.push_back(pv.ids[k]);
+		return out;
+	}
 }

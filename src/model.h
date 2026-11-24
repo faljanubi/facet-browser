@@ -56,6 +56,9 @@ namespace fb {
 		void sortItems(size_t pane, std::vector<FacetItem>& items, int column, const std::vector<uint32_t>& stats, bool descending, int sortStat = -1) const;
 		std::vector<uint32_t> filter(size_t pane, const std::vector<uint32_t>& input, const std::vector<uint32_t>& ids, bool andLogic) const;
 		bool findValue(size_t pane, const char* key, uint32_t& out) const;
+		bool findTrack(const metadb_handle_ptr& h, uint32_t& out) const;
+		// the value ids a track has in a pane (several for multi-value and "|" columns)
+		std::vector<uint32_t> trackValues(size_t pane, uint32_t track) const;
 
 		pfc::string8 statText(Stat s, const FacetItem& it, size_t rowIndex) const;
 

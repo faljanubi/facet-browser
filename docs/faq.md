@@ -34,7 +34,7 @@ Set up your panes again; it only takes a minute with the header menu, and the
 ## Does it work with Columns UI?
 
 Facet Browser is a Default UI element. Whatever UI you use, you can always open it in its own
-window with *View › Facet Browser*.
+window with *Library › Facet Browser*.
 
 ## A new autoplaylist is empty
 

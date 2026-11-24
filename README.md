@@ -1,6 +1,6 @@
 # Facet Browser for foobar2000
 
-**Version 1.0.1** · Created by **Faris Aljanubi** · Licence: [GPL-3.0](LICENSE) · **[Documentation](https://faljanubi.github.io/facet-browser/)**
+**Version 1.0.2** · Created by **Faris Aljanubi** · Licence: [GPL-3.0](LICENSE) · **[Documentation](https://faljanubi.github.io/facet-browser/)**
 
 ![Facet Browser in foobar2000's dark mode](docs/screenshots/dark.png)
 
@@ -55,7 +55,7 @@ and colour scheme. It is an independent reimplementation and contains no code fr
 2. Double-click it, or in foobar2000 open *File › Preferences › Components*, click
    **Install...**, pick the file, then click **Apply** and let foobar2000 restart.
 3. Use it:
-   - **As a window:** *View › Facet Browser*
+   - **As a window:** *Library › Facet Browser*
    - **In your layout (Default UI):** *View › Layout › Enable layout editing mode*, right-click
      a panel › *Replace UI Element...* › **Facet Browser** (under *Media Library Viewers*)
 

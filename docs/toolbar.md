@@ -11,7 +11,7 @@ nav_order: 6
 ```
 
 Right-click an empty part of the toolbar to hide it or move it to the top. To bring a hidden
-toolbar back, right-click an item › **Show toolbar**.
+toolbar back, right-click a column header › **Show toolbar**.
 
 1. TOC
 {:toc}
@@ -82,7 +82,7 @@ click the button itself. Click the **▾** part to choose a different action:
 | Add to selection playlist | Adds the tracks to the end of the selection playlist |
 | Add to current playlist | Adds the tracks to the end of the active playlist |
 
-All actions are in the item right-click menu too.
+All actions are in the column header's right-click menu too, for the pane's selection.
 
 **Run on single click** (at the bottom of the **▾** menu) runs the action every time the
 selection changes, so the selection playlist follows your clicks. It works best with *Send to

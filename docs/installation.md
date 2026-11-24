@@ -37,7 +37,7 @@ The Folder column also uses these folders as its starting point.
 
 ## Open Facet Browser
 
-**As its own window:** *View › Facet Browser*.
+**As its own window:** *Library › Facet Browser*.
 
 **As part of your layout (Default UI):**
 

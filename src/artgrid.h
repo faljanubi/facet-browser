@@ -19,6 +19,7 @@ namespace fb {
 		virtual void artHeaderClick(size_t column) = 0;
 		virtual ui_element_instance_callback::ptr artCallback() = 0;
 		virtual bool artKeyDown(UINT) { return false; }       // true: key handled by the host (pane shortcuts)
+		virtual void artFocusChanged(bool) {}                 // the grid got (true) or lost (false) the keyboard focus
 	};
 
 	class CArtGrid : public CWindowImpl<CArtGrid> {
@@ -43,8 +44,8 @@ namespace fb {
 			MSG_WM_CONTEXTMENU(OnContextMenu)
 			MSG_WM_KEYDOWN(OnKeyDown)
 			MSG_WM_GETDLGCODE(OnGetDlgCode)
-			MSG_WM_SETFOCUS(OnFocus)
-			MSG_WM_KILLFOCUS(OnFocus)
+			MSG_WM_SETFOCUS(OnSetFocus)
+			MSG_WM_KILLFOCUS(OnKillFocus)
 			NOTIFY_CODE_HANDLER_EX(HDN_ITEMCLICK, OnHeaderClick)
 			NOTIFY_CODE_HANDLER_EX(NM_CUSTOMDRAW, OnHeaderCustomDraw)
 			MESSAGE_HANDLER_EX(WM_ART_LOADED, OnArtLoaded)
@@ -63,6 +64,7 @@ namespace fb {
 		std::vector<size_t> GetSelection() const;
 		void SetSelection(const std::vector<size_t>& sel);
 		bool IsSelected(size_t idx) const { return idx < m_sel.size() && m_sel[idx]; }
+		void EnsureVisible(size_t idx);
 
 	private:
 		void FitHeader();
@@ -83,7 +85,8 @@ namespace fb {
 		void OnContextMenu(CWindow wnd, CPoint pt);
 		void OnKeyDown(UINT ch, UINT, UINT);
 		UINT OnGetDlgCode(LPMSG) { return DLGC_WANTARROWS | DLGC_WANTCHARS; }
-		void OnFocus(CWindow) { Invalidate(); }
+		void OnSetFocus(CWindow) { Invalidate(); m_host->artFocusChanged(true); }
+		void OnKillFocus(CWindow) { Invalidate(); m_host->artFocusChanged(false); }
 		LRESULT OnHeaderClick(LPNMHDR hdr);
 		LRESULT OnHeaderCustomDraw(LPNMHDR hdr);
 		LRESULT OnArtLoaded(UINT, WPARAM, LPARAM);
@@ -91,7 +94,6 @@ namespace fb {
 		void Relayout();
 		CRect ContentRect() const;            // client area below the header
 		void ScrollTo(int y);
-		void EnsureVisible(size_t idx);
 		int HitTest(CPoint pt) const;
 		CRect ItemRect(size_t idx) const;     // content coordinates
 		CRect ArtRect(const CRect& item) const;

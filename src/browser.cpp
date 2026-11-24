@@ -154,6 +154,8 @@ namespace fb {
 	}
 
 	void CFacetBrowser::OnDestroy() {
+		m_selHolder.release();
+		m_focusPane = SIZE_MAX;
 		unregisterListener(this);
 		library_manager_v3::get()->unregister_callback(this);
 		DestroyPanes();
@@ -281,6 +283,7 @@ namespace fb {
 				pane.list->SetSelectionModeMulti();
 				pane.list->hasChildren = [this, i](size_t row) { const FacetItem* it = RowItem(i, row); return it && it->hasChildren; };
 				pane.list->isSplitterZone = [this](CPoint pt) { return InSplitterZone(pt); };
+				pane.list->focusChanged = [this, i](bool got) { OnPaneFocus(i, got); };
 				CPaneList* list = pane.list.get();
 				pane.list->columnResized = [this, list](int col) { if (col >= 0) PostMessage(WM_FB_COLUMN_RESIZED, (WPARAM)col, (LPARAM)list); };
 				pane.list->markupText = [this, i](size_t row, size_t col) -> pfc::string8 {
@@ -605,7 +608,10 @@ namespace fb {
 		if (id == kFreePanesTimer) { FreeDeadPanes(); return; }
 		KillTimer(id);
 		if (id == TIMER_REBUILD || id == TIMER_SEARCH) RebuildSource();
-		else if (id == TIMER_SELECT_ACTION && m_selectActionPane < m_panes.size()) RunToolbarAction(m_selectActionPane);
+		else if (id == TIMER_SELECT_ACTION) {
+			m_selectActionPending = false;
+			if (m_selectActionPane < m_panes.size()) RunToolbarAction(m_selectActionPane);
+		}
 	}
 
 	static COLORREF mixColor(COLORREF a, COLORREF b, int pct) {
@@ -1052,11 +1058,32 @@ namespace fb {
 		ReadSelectionFromUI(i);
 		Cascade(i, false);
 		if (i + 1 < m_panes.size()) Cascade(i + 1);
+		PublishSelection(i);
 		if (m_cfg.actionOnSelect && actionRunsOnSelect(m_cfg.action)) {
 			// short delay: arrow-key and drag selections settle before the playlist is filled
 			m_selectActionPane = i;
+			m_selectActionPending = true;
 			SetTimer(TIMER_SELECT_ACTION, 150);
 		}
+	}
+
+	void CFacetBrowser::OnPaneFocus(size_t i, bool got) {
+		if (got) {
+			m_focusPane = i;
+			if (m_selHolder.is_empty()) m_selHolder = ui_selection_manager::get()->acquire();
+			PublishSelection(i);
+		} else if (m_focusPane == i) {
+			// the SDK asks selection holders to let go when their window loses the focus
+			m_focusPane = SIZE_MAX;
+			m_selHolder.release();
+		}
+	}
+
+	void CFacetBrowser::PublishSelection(size_t i) {
+		if (m_selHolder.is_empty() || i != m_focusPane || i >= m_panes.size()) return;
+		metadb_handle_list tracks = PaneTracks(i);
+		SortTracks(tracks);
+		m_selHolder->set_selection(tracks);
 	}
 
 	void CFacetBrowser::OnHeaderClick(size_t pane, size_t col) {
@@ -1154,7 +1181,7 @@ namespace fb {
 
 	void CFacetBrowser::listItemAction(ctx_t ctx, size_t) {
 		size_t i = PaneIndex(ctx);
-		if (i < m_panes.size()) RunToolbarAction(i);
+		if (i < m_panes.size()) RunItemAction(i);
 	}
 
 	void CFacetBrowser::listColumnHeaderClick(ctx_t ctx, size_t sub) { OnHeaderClick(PaneIndex(ctx), sub); }
@@ -1172,6 +1199,7 @@ namespace fb {
 	enum {
 		CMD_ACTION = 1,                 // + Action
 		CMD_LOGIC_OR = 20, CMD_LOGIC_AND,
+		CMD_SHOW_PLAYING = 25,
 		CMD_PANE_INSERT = 30, CMD_PANE_APPEND, CMD_PANE_REMOVE, CMD_PANE_CUT, CMD_PANE_COPY, CMD_PANE_PASTE,
 		CMD_SHOW_TOOLBAR = 40, CMD_TOOLBAR_BOTTOM,
 		CMD_COL_MULTI = 50, CMD_COL_PREFS, CMD_COL_RESET_WIDTHS,
@@ -1379,23 +1407,22 @@ namespace fb {
 		contextmenu_manager::ptr cm;
 		metadb_handle_list tracks;
 
+		tracks = PaneTracks(i);
+		SortTracks(tracks);
 		if (onHeader) {
-			BuildHeaderMenu(i, menu, desc);
-		} else {
-			tracks = PaneTracks(i);
-			SortTracks(tracks);
+			// everything of Facet Browser's own lives on the column header: the actions for the
+			// pane's selection, Show now playing and the pane options
 			const UINT dis = tracks.get_count() ? 0 : MF_GRAYED;
 			for (uint32_t a = 0; a < (uint32_t)Action::Count; ++a) {
 				menu.AppendMenu(MF_STRING | dis, CMD_ACTION + a, pfc::stringcvt::string_wide_from_utf8(actionName((Action)a)));
 				desc.Set(CMD_ACTION + a, actionDescription((Action)a));
 			}
 			menu.SetMenuDefaultItem(CMD_ACTION + (UINT)m_cfg.action, FALSE);
-			if (tracks.get_count()) {
-				menu.AppendMenu(MF_SEPARATOR);
-				cm = contextmenu_manager::g_create();
-				cm->init_context(tracks, 0);
-				cm->win32_build_menu(menu, CMD_CONTEXT, 0x7FFF - CMD_CONTEXT);
-			}
+			menu.AppendMenu(MF_SEPARATOR);
+			menu.AppendMenu(MF_STRING | (playback_control::get()->is_playing() ? 0 : MF_GRAYED), CMD_SHOW_PLAYING, L"Show now playing");
+			desc.Set(CMD_SHOW_PLAYING, "Selects the playing track in the panes.");
+			menu.AppendMenu(MF_SEPARATOR);
+			BuildHeaderMenu(i, menu, desc);
 			menu.AppendMenu(MF_SEPARATOR);
 			CMenu mLogic; mLogic.CreatePopupMenu();
 			mLogic.AppendMenu(MF_STRING, CMD_LOGIC_OR, L"OR (default)");
@@ -1419,10 +1446,17 @@ namespace fb {
 			desc.Set(CMD_PANE_COPY, "Copies the selected pane to Windows Clipboard.");
 			desc.Set(CMD_PANE_PASTE, "Inserts pane from Windows Clipboard before this one. Hold Shift to insert after it.");
 			menu.AppendMenu(MF_POPUP, (UINT_PTR)mPane.Detach(), L"Pane");
-			BuildHeaderMenu(i, menu, desc);
 			menu.AppendMenu(MF_SEPARATOR);
 			menu.AppendMenu(MF_STRING | (m_cfg.showToolbar ? MF_CHECKED : 0), CMD_SHOW_TOOLBAR, L"Show toolbar");
 			desc.Set(CMD_SHOW_TOOLBAR, "Shows or hides the toolbar.");
+		} else {
+			// items get foobar2000's own track commands only
+			if (tracks.get_count()) {
+				cm = contextmenu_manager::g_create();
+				cm->init_context(tracks, 0);
+				cm->win32_build_menu(menu, CMD_CONTEXT, 0x7FFF - CMD_CONTEXT);
+			}
+			else return;
 		}
 
 		if (cm.is_valid()) desc.SetCM(cm, CMD_CONTEXT, ~0u);
@@ -1435,6 +1469,7 @@ namespace fb {
 			m_cfg.panes[i].andLogic = (cmd == CMD_LOGIC_AND);
 			Cascade(i, false); if (i + 1 < m_panes.size()) Cascade(i + 1);
 			return;
+		case CMD_SHOW_PLAYING: ShowNowPlaying(); return;
 		case CMD_PANE_INSERT: InsertPane(i, BrowserConfig::makePane("Genre")); return;
 		case CMD_PANE_APPEND: InsertPane(i + 1, BrowserConfig::makePane("Genre")); return;
 		case CMD_PANE_REMOVE: RemovePane(i); return;
@@ -1679,6 +1714,52 @@ namespace fb {
 		RunAction(m_cfg.action, PaneTracks(pane), pane);
 	}
 
+	// With "Run on single click" the clicks have already filled the playlist, so a double-click
+	// (or Enter) starts playback, like Facets: single clicks browse, double-click plays.
+	void CFacetBrowser::RunItemAction(size_t pane) {
+		if (pane >= m_panes.size()) return;
+		if (!m_cfg.actionOnSelect || !actionRunsOnSelect(m_cfg.action)) { RunToolbarAction(pane); return; }
+		const bool pending = m_selectActionPending;   // the first click's action hasn't run yet
+		KillTimer(TIMER_SELECT_ACTION);
+		m_selectActionPending = false;
+		auto pm = playlist_manager::get();
+		switch (m_cfg.action) {
+		case Action::SendToSelection:
+		case Action::SendToSelectionKeepPlaying:
+			RunAction(Action::SendToSelection, PaneTracks(pane), pane);
+			return;
+		case Action::SendToCurrent: {
+			if (pending) RunToolbarAction(pane);
+			size_t idx = pm->get_active_playlist();
+			if (idx != pfc_infinite && pm->playlist_get_item_count(idx) > 0) PlayFrom(idx, 0);
+			return;
+		}
+		case Action::AddToSelection:
+		case Action::AddToCurrent: {
+			// don't add the tracks a second time; play the block the click added
+			if (pending) RunToolbarAction(pane);
+			const size_t n = PaneTracks(pane).get_count();
+			size_t idx = m_cfg.action == Action::AddToSelection ? pm->find_playlist(getSelectionPlaylist()) : pm->get_active_playlist();
+			if (idx == pfc_infinite || n == 0) return;
+			const size_t count = pm->playlist_get_item_count(idx);
+			if (count >= n) PlayFrom(idx, count - n);
+			return;
+		}
+		default:
+			RunToolbarAction(pane);
+		}
+	}
+
+	void CFacetBrowser::PlayFrom(size_t playlist, size_t item) {
+		auto pm = playlist_manager::get();
+		pm->set_active_playlist(playlist);
+		pm->playlist_clear_selection(playlist);
+		pm->playlist_set_selection_single(playlist, item, true);
+		pm->playlist_set_focus_item(playlist, item);
+		pm->set_playing_playlist(playlist);
+		playback_control::get()->start(playback_control::track_command_settrack);
+	}
+
 	void CFacetBrowser::RunAction(Action a, metadb_handle_list tracks, size_t pane) {
 		SortTracks(tracks);
 		auto pm = playlist_manager::get();
@@ -1764,6 +1845,54 @@ namespace fb {
 		}
 		default: break;
 		}
+	}
+
+	// ================================================================ show now playing
+
+	// Selects the playing track pane by pane, left to right. Where the track has several entries in a
+	// pane (multi-value or "|" columns) the one with the fewest tracks wins, e.g. "Lana Del Rey" over
+	// the letter group "L". A search that hides the track is cleared; filters are left alone.
+	// Never runs the action, even with "Run on single click". Item right-click menu only.
+	bool CFacetBrowser::ShowNowPlaying() {
+		if (!m_hWnd || m_panes.empty()) return false;
+		metadb_handle_ptr np;
+		if (!playback_control::get()->get_now_playing(np) || np.is_empty()) return false;
+		KillTimer(TIMER_SELECT_ACTION);
+		m_selectActionPending = false;
+		// a library/playlist change or search edit still waiting on its timer: apply it first
+		const bool rebuildDue = KillTimer(TIMER_REBUILD) != FALSE;
+		if (KillTimer(TIMER_SEARCH) != FALSE || rebuildDue) RebuildSource();
+		uint32_t t = 0;
+		if (!m_model.findTrack(np, t)) {
+			if (SearchText().is_empty()) return false;
+			m_search.SetWindowText(L"");
+			KillTimer(TIMER_SEARCH);   // in case the edit reported the change
+			RebuildSource();
+			UpdateToolbarText();
+			if (!m_model.findTrack(np, t)) return false;
+		}
+		for (size_t i = 0; i < m_panes.size(); ++i) {
+			auto& p = m_panes[i];
+			if (std::find(p.input.begin(), p.input.end(), t) == p.input.end()) break;   // shouldn't happen
+			const auto values = m_model.trackValues(i, t);
+			const FacetItem* best = nullptr;
+			size_t bestRow = 0;
+			for (size_t r = 0; r < p.items.size(); ++r) {
+				const auto& it = p.items[r];
+				if (std::find(values.begin(), values.end(), it.valueId) == values.end()) continue;
+				if (!best || it.count < best->count) { best = &it; bestRow = r; }
+			}
+			if (!best) break;
+			p.selected = { m_model.valueKey(i, best->valueId) };
+			Cascade(i, false);
+			RefreshPaneUI(i);
+			const size_t row = bestRow + (m_cfg.panes[i].summary ? 1 : 0);
+			if (p.list) p.list->EnsureItemVisible(row);
+			if (p.grid) p.grid->EnsureVisible(row);
+			m_lastPane = i;
+		}
+		if (m_focusPane < m_panes.size()) PublishSelection(m_focusPane);
+		return true;
 	}
 
 	// ================================================================ registration

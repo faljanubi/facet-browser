@@ -39,8 +39,8 @@ along the bottom.
 - **Double-click** or press **Enter** to run the *action* shown on the toolbar's action button.
   The default action, *Send to selection playlist*, fills a playlist named
   **Library selection** with the matching tracks and starts playing.
-- **Right-click** items for all actions, plus foobar2000's normal track menu
-  (Properties, ReplayGain, Convert and so on).
+- **Right-click** items for foobar2000's normal track menu (Properties, ReplayGain, Convert
+  and so on).
 - **Drag** items into any playlist.
 
 ## Changing a pane
@@ -49,12 +49,17 @@ Right-click a pane's **column header** to open the header menu:
 
 | Menu | What it does |
 |:--|:--|
+| **Actions** | Send the pane's selection to a playlist; the bold one is the double-click action |
+| **Show now playing** | Select the playing track in every pane |
 | **Columns** | Pick what the pane lists: Genre, Artist, Album, Folder... |
 | **Statistics** | Add number columns: Items, Duration, Rating... |
 | **Sort by** | Sort by any column or statistic, ascending or descending |
 | **Display** | List or album art, summary item on/off, art type |
+| **Selection logic** | OR or AND when several items are selected |
+| **Pane** | Insert, remove, cut, copy and paste panes |
+| **Show toolbar** | Show or hide the toolbar |
 
-To add, remove or move panes, right-click an item and use the **Pane** menu. Drag the line
+To add, remove or move panes, use the header menu's **Pane** submenu. Drag the line
 between two panes to resize them.
 
 ## Searching

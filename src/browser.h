@@ -17,12 +17,15 @@ namespace fb {
 		std::function<bool(CPoint)> isSplitterZone;   // screen point is on/next to a pane divider
 		std::function<void(int)> columnResized;      // the user dragged or double-clicked a column divider
 		std::function<pfc::string8(size_t, size_t)> markupText;   // cell text with dim/highlight markers, or "" to draw normally
+		std::function<void(bool)> focusChanged;      // got (true) or lost (false) the keyboard focus
 		typedef CListControlFb2kColorsUIElem<CListControlOwnerData> TBase;
 		BEGIN_MSG_MAP_EX(CPaneList)
 			MSG_WM_NCHITTEST(OnNcHitTest)
 			NOTIFY_CODE_HANDLER_EX(HDN_ENDTRACKW, OnHeaderResized)
 			NOTIFY_CODE_HANDLER_EX(HDN_DIVIDERDBLCLICKW, OnHeaderResized)
 			NOTIFY_CODE_HANDLER_EX(NM_CUSTOMDRAW, OnHeaderDraw)
+			MSG_WM_SETFOCUS(OnFocusIn)
+			MSG_WM_KILLFOCUS(OnFocusOut)
 			CHAIN_MSG_MAP(TBase)
 		END_MSG_MAP()
 	protected:
@@ -30,6 +33,8 @@ namespace fb {
 		// Let the parent handle the mouse right next to a divider, so the thin line is easy to grab.
 		LRESULT OnNcHitTest(CPoint pt) { if (isSplitterZone && isSplitterZone(pt)) return HTTRANSPARENT; SetMsgHandled(FALSE); return 0; }
 		LRESULT OnHeaderDraw(LPNMHDR hdr);
+		void OnFocusIn(CWindow) { if (focusChanged) focusChanged(true); SetMsgHandled(FALSE); }
+		void OnFocusOut(CWindow) { if (focusChanged) focusChanged(false); SetMsgHandled(FALSE); }
 		LRESULT OnHeaderResized(LPNMHDR hdr) {
 			if (columnResized) columnResized(reinterpret_cast<LPNMHEADER>(hdr)->iItem);
 			SetMsgHandled(FALSE);   // libPPUI still applies the change
@@ -68,6 +73,9 @@ namespace fb {
 		void set_configuration(ui_element_config::ptr cfg) override;
 		ui_element_config::ptr get_configuration() override { return makeConfig(m_cfg); }
 		void notify(const GUID& what, t_size p1, const void* p2, t_size p2size) override;
+
+		// Selects the playing track's entries pane by pane (item menu command).
+		bool ShowNowPlaying();
 
 		BEGIN_MSG_MAP_EX(CFacetBrowser)
 			MSG_WM_CREATE(OnCreate)
@@ -125,11 +133,12 @@ namespace fb {
 			metadb_handle_ptr artTrack(size_t i) override { if (dead) return nullptr; return owner->ArtTrack(pane, i); }
 			bool artIsSummary(size_t i) override { return !dead && owner->IsSummaryRow(pane, i); }
 			void artSelectionChanged() override { if (!dead) owner->OnPaneSelectionChanged(pane); }
-			void artAction(size_t) override { if (!dead) owner->RunToolbarAction(pane); }
+			void artAction(size_t) override { if (!dead) owner->RunItemAction(pane); }
 			void artContextMenu(HWND w, CPoint pt, bool onHeader) override { if (!dead) owner->ShowPaneMenu(pane, w, pt, onHeader); }
 			void artHeaderClick(size_t col) override { if (!dead) owner->OnHeaderClick(pane, col); }
 			ui_element_instance_callback::ptr artCallback() override { return owner->m_callback; }
 			bool artKeyDown(UINT ch) override { return !dead && owner->PaneKeyDown(pane, ch); }
+			void artFocusChanged(bool got) override { if (!dead) owner->OnPaneFocus(pane, got); }
 		};
 
 		struct Pane {
@@ -212,6 +221,11 @@ namespace fb {
 		void FitKeyColumns(size_t i);
 		void ReadSelectionFromUI(size_t i);
 		void OnPaneSelectionChanged(size_t i);
+		// foobar2000's selection (Album Art panel, Properties, ...) follows the focused pane
+		void OnPaneFocus(size_t i, bool got);
+		void PublishSelection(size_t i);
+		ui_selection_holder::ptr m_selHolder;
+		size_t m_focusPane = SIZE_MAX;
 		void OnHeaderClick(size_t pane, size_t col);
 		metadb_handle_list PaneTracks(size_t i) const;
 		size_t PaneIndex(const void* ctx) const;
@@ -239,6 +253,9 @@ namespace fb {
 
 		// actions
 		void RunToolbarAction(size_t pane);
+		void RunItemAction(size_t pane);   // double-click / Enter on an item
+		void PlayFrom(size_t playlist, size_t item);
+		bool m_selectActionPending = false;
 		void RunAction(Action a, metadb_handle_list tracks, size_t pane);
 		void SortTracks(metadb_handle_list& tracks);
 		pfc::string8 SelectionLabel(size_t pane) const;

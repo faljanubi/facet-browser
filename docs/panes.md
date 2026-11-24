@@ -120,7 +120,7 @@ background.
 
 ## Selection logic
 
-Right-click an item › **Selection logic**:
+*Header menu › Selection logic*:
 
 - **OR (default):** tracks matching *any* selected item. Selecting *Jazz* and *Blues* shows
   both genres.
@@ -129,7 +129,7 @@ Right-click an item › **Selection logic**:
 
 ## Managing panes
 
-Right-click an item › **Pane**:
+*Header menu › Pane*:
 
 | Command | Shortcut | Effect |
 |:--|:--|:--|
