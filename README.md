@@ -1,6 +1,6 @@
 # Facet Browser for foobar2000
 
-**Version 1.0.2** · Created by **Faris Aljanubi** · Licence: [GPL-3.0](LICENSE) · **[Documentation](https://faljanubi.github.io/facet-browser/)**
+**Version 1.0.3** · Created by **Faris Aljanubi** · Licence: [GPL-3.0](LICENSE) · **[Documentation](https://faljanubi.github.io/facet-browser/)**
 
 ![Facet Browser in foobar2000's dark mode](docs/screenshots/dark.png)
 
@@ -20,21 +20,25 @@ and colour scheme. It is an independent reimplementation and contains no code fr
   marked with ›. Example: *Folder › Folder › Folder › Filename*.
 - **Columns** (right-click a pane header › *Columns*): Genre, Album artist, Artist, Date, Album,
   Track, Title, Filename, Filename.ext, Folder, or *Multiple columns* side by side. Column
-  definitions are title formatting, edited in *Preferences › Media Library › Facet Browser*.
+  definitions are title formatting, edited in *Preferences › Media Library › Facet Browser › Columns*.
   `%<field>%` gives one entry per value of a multi-value tag. `A|B` lists every track under the
   value of `A` *and* under the value of `B` (e.g. an initial letter or decade next to each artist
   or year), and the Default UI markers `<dim>` and `>highlight<` are shown as in the playlist view.
 - **Statistics** (header › *Statistics*): Bitrate, Duration, File created, First/Last added,
   First/Last played, First/Last release, Index, Items, Last modified, Lossless ratio, Played,
-  Played duration, Rating, Subitems, Total peak, Total size. Click a header to sort by it.
+  Played duration, Rating, Subitems, Total peak, Total size, plus **custom statistics** you
+  define yourself (a title formatting pattern combined as total, average, lowest or highest,
+  in *Preferences › Media Library › Facet Browser › Statistics*). Click a header to sort by it.
   Column widths you set are remembered per pane (header › *Columns* › *Reset column widths*).
 - **Sort by** (header › *Sort by*): sort a pane by any of its columns or by any statistic, even
   one that is not displayed, ascending or descending.
 - **Display** (header › *Display*): Columns, or Album art with bottom labels, right labels or
-  no labels; summary item on/off; Front, Back, Disc or Artist art.
+  no labels; summary item on/off; Front, Back, Disc or Artist art; album art size per pane
+  (*Larger art* / *Smaller art*, or Ctrl+mouse wheel over the pane).
 - **Toolbar** (bottom or top): **Source** (Library, Playlist, Automatic), **Filter** (your saved
   queries, optionally several at once), **Search** with history, the **action** button with
-  its menu, and **?** for query syntax help.
+  its menu, and **?** for query syntax help. Each item can be hidden (right-click the toolbar).
+  With the *Playlist* source, the playlist's selection follows what you pick in the panes.
 - **Actions** (toolbar button, double-click, Enter, right-click): Send to selection playlist,
   keep playing playlist · Send to selection playlist · Send to current playlist · Send to new
   playlist · Send to new autoplaylist · Add to selection playlist · Add to current playlist.
@@ -79,7 +83,7 @@ src/
   main.cpp       component registration and About text
   config.*       per-panel settings (panes, statistics, display, toolbar)
   globals.*      shared column/filter definitions, selection playlist, search history
-  prefs.cpp      Preferences page (Media Library > Facet Browser)
+  prefs.cpp      Preferences pages (Media Library > Facet Browser, Columns, Filters, Statistics)
   model.*        evaluates columns once per track; folder levels, grouping, statistics, AND/OR filtering
   browser.*      the UI element: panes, search, presets, actions, context menu, layout
   artgrid.*      album art pane (custom-drawn grid, background cover loading via WIC)

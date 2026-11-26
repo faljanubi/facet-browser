@@ -1,9 +1,10 @@
 #include "stdafx.h"
 #include "config.h"
+#include "globals.h"
 
 namespace fb {
 
-	static const uint32_t kConfigVersion = 4;   // 3: + PaneConfig::sortStat; 4: + PaneConfig::widths, actionOnSelect
+	static const uint32_t kConfigVersion = 5;   // 3: + PaneConfig::sortStat; 4: + PaneConfig::widths, actionOnSelect; 5: custom stats, artScale, toolbarItems
 	const uint32_t BrowserConfig::kVersion = kConfigVersion;
 
 	const char* statName(Stat s) {
@@ -39,6 +40,22 @@ namespace fb {
 		case Stat::FileCreated: return "Displays the earliest file creation time.";
 		default: return "";
 		}
+	}
+
+	pfc::string8 statLabel(uint32_t id) {
+		if (!isCustomStat(id)) return statName((Stat)id);
+		auto defs = getCustomStats();
+		const uint32_t k = id - kCustomStatBase;
+		return k < defs.size() ? defs[k].name : pfc::string8();
+	}
+
+	// Custom statistics are stored by name (their position in the global list can change).
+	static const uint32_t kCustomMarker = 0xFFFFFFFF;
+	static const int32_t kCustomSortMarker = -2;
+	static bool customStatId(const char* name, uint32_t& out) {
+		auto defs = getCustomStats();
+		for (size_t k = 0; k < defs.size(); ++k) if (defs[k].name == name) { out = kCustomStatBase + (uint32_t)k; return true; }
+		return false;
 	}
 
 	const std::vector<uint32_t>& statMenuOrder() {
@@ -95,10 +112,15 @@ namespace fb {
 		out << (uint32_t)p.columns.size();
 		for (auto& c : p.columns) out << c;
 		out << (uint32_t)p.stats.size();
-		for (auto s : p.stats) out << s;
-		out << (uint32_t)p.display << (uint32_t)p.artType << p.summary << p.andLogic << p.sortColumn << p.sortDescending << p.weight << p.sortStat;
+		for (auto s : p.stats) {
+			if (isCustomStat(s)) out << kCustomMarker << statLabel(s);
+			else out << s;
+		}
+		const bool customSort = p.sortStat >= 0 && isCustomStat((uint32_t)p.sortStat);
+		out << (uint32_t)p.display << (uint32_t)p.artType << p.summary << p.andLogic << p.sortColumn << p.sortDescending << p.weight << (customSort ? kCustomSortMarker : p.sortStat);
 		out << (uint32_t)p.widths.size();
 		for (auto& w : p.widths) out << w.first << w.second;
+		out << p.artScale << (customSort ? statLabel((uint32_t)p.sortStat) : pfc::string8());
 	}
 
 	PaneConfig BrowserConfig::readPane(stream_reader_formatter<>& in, uint32_t version) {
@@ -108,7 +130,14 @@ namespace fb {
 		for (uint32_t i = 0; i < n; ++i) { pfc::string8 c; in >> c; p.columns.push_back(c); }
 		in >> n;
 		if (n > 64) throw exception_io_data();
-		for (uint32_t i = 0; i < n; ++i) { uint32_t s; in >> s; if (s < (uint32_t)Stat::Count) p.stats.push_back(s); }
+		for (uint32_t i = 0; i < n; ++i) {
+			uint32_t s; in >> s;
+			if (s == kCustomMarker && version >= 5) {
+				pfc::string8 name; in >> name;
+				uint32_t id;
+				if (customStatId(name, id) && std::find(p.stats.begin(), p.stats.end(), id) == p.stats.end()) p.stats.push_back(id);
+			} else if (s < (uint32_t)Stat::Count) p.stats.push_back(s);
+		}
 		uint32_t d, a;
 		in >> d >> a >> p.summary >> p.andLogic >> p.sortColumn >> p.sortDescending >> p.weight;
 		if (version >= 3) in >> p.sortStat;
@@ -117,7 +146,18 @@ namespace fb {
 			if (n > 256) throw exception_io_data();
 			for (uint32_t i = 0; i < n; ++i) { pfc::string8 k; uint32_t w; in >> k >> w; if (w > 0 && w < 10000) p.widths.emplace_back(k, w); }
 		}
-		if (p.sortStat >= (int32_t)Stat::Count || p.sortStat == (int32_t)Stat::Index) p.sortStat = -1;
+		if (version >= 5) {
+			pfc::string8 sortName;
+			in >> p.artScale >> sortName;
+			p.artScale = std::max(kArtScaleMin, std::min(kArtScaleMax, p.artScale));
+			uint32_t id;
+			if (p.sortStat == kCustomSortMarker) p.sortStat = customStatId(sortName, id) ? (int32_t)id : -1;
+		}
+		const bool customSort = p.sortStat >= (int32_t)kCustomStatBase;
+		if (!customSort && (p.sortStat >= (int32_t)Stat::Count || p.sortStat == (int32_t)Stat::Index)) p.sortStat = -1;
+		if (p.sortStat < -1) p.sortStat = -1;
+		// a sort column past the end (a custom statistic that no longer exists) falls back to the first column
+		if (p.sortColumn < 0 || p.sortColumn >= (int32_t)(p.columns.size() + p.stats.size())) p.sortColumn = 0;
 		p.display = (Display)(d <= 3 ? d : 0);
 		p.artType = (ArtType)(a <= 3 ? a : 0);
 		if (p.weight == 0) p.weight = 1000;
@@ -132,7 +172,7 @@ namespace fb {
 		out << (uint32_t)source;
 		out << (uint32_t)filters.size();
 		for (auto& f : filters) out << f;
-		out << multipleFilters << (uint32_t)action << showToolbar << toolbarBottom << actionOnSelect;
+		out << multipleFilters << (uint32_t)action << showToolbar << toolbarBottom << actionOnSelect << toolbarItems;
 	}
 
 	void BrowserConfig::read(stream_reader_formatter<>& in) {
@@ -152,5 +192,6 @@ namespace fb {
 		in >> multipleFilters >> a >> showToolbar >> toolbarBottom;
 		action = (Action)(a < (uint32_t)Action::Count ? a : 1);
 		if (version >= 4) in >> actionOnSelect;
+		if (version >= 5) { in >> toolbarItems; toolbarItems &= TB_ALL; }
 	}
 }

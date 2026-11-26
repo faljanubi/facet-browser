@@ -207,7 +207,30 @@ namespace fb {
 		return id;
 	}
 
-	bool FacetModel::build(metadb_handle_list_cref tracks, const std::vector<PaneSpec>& panes, bool wantCreated, pfc::string8& error) {
+	// A title formatting result as a number: leading/trailing spaces allowed, anything else makes it no number.
+	static double parseNumber(const char* s) {
+		while (*s == ' ') ++s;
+		if (!*s) return NAN;
+		char* end = nullptr;
+		const double v = strtod(s, &end);
+		if (end == s) return NAN;
+		while (*end == ' ') ++end;
+		return *end ? NAN : v;
+	}
+
+	static pfc::string8 formatNumber(double v) {
+		char buf[64];
+		if (std::fabs(v) < 1e15 && std::fabs(v - std::llround(v)) < 1e-9) sprintf_s(buf, "%lld", std::llround(v));
+		else {
+			sprintf_s(buf, "%.2f", v);
+			size_t len = strlen(buf);
+			while (len > 0 && buf[len - 1] == '0') buf[--len] = 0;
+			if (len > 0 && buf[len - 1] == '.') buf[--len] = 0;
+		}
+		return buf;
+	}
+
+	bool FacetModel::build(metadb_handle_list_cref tracks, const std::vector<PaneSpec>& panes, bool wantCreated, const std::vector<StatDef>& customs, pfc::string8& error) {
 		auto compiler = titleformat_compiler::get();
 		// one script per non-folder column
 		struct Col { size_t pane, column; titleformat_object::ptr script; };
@@ -235,8 +258,17 @@ namespace fb {
 			compiler->compile_safe(infoScript, s);
 		}
 
+		// custom statistics: a pattern that doesn't compile just gives no numbers
+		std::vector<titleformat_object::ptr> customScripts(customs.size());
+		m_customCombine.clear();
+		for (size_t k = 0; k < customs.size(); ++k) {
+			if (!compiler->compile(customScripts[k], customs[k].pattern)) customScripts[k].release();
+			m_customCombine.push_back(customs[k].combine);
+		}
+
 		m_tracks = tracks;
 		const size_t n = tracks.get_count();
+		m_custom.assign(customs.size(), std::vector<double>(n, NAN));
 		std::vector<std::vector<pfc::string8>> raw(cols.size(), std::vector<pfc::string8>(n));
 		std::vector<pfc::string8> rawInfo(n);
 		std::vector<uint64_t> created(wantCreated ? n : 0, 0);
@@ -245,6 +277,14 @@ namespace fb {
 			for (size_t k = 0; k < cols.size(); ++k)
 				db->formatTitle_v2(tracks[idx], rec, nullptr, raw[k][idx], cols[k].script, nullptr);
 			db->formatTitle_v2(tracks[idx], rec, nullptr, rawInfo[idx], infoScript, nullptr);
+			if (!customScripts.empty()) {
+				pfc::string8 v;
+				for (size_t k = 0; k < customScripts.size(); ++k) {
+					if (customScripts[k].is_empty()) continue;
+					db->formatTitle_v2(tracks[idx], rec, nullptr, v, customScripts[k], nullptr);
+					m_custom[k][idx] = parseNumber(v);
+				}
+			}
 			if (wantCreated) {
 				// foobar2000 keeps each file's creation time with its cached stats
 				if (rec.info.is_valid()) created[idx] = rec.info->stats2_().m_timestampCreate;
@@ -358,6 +398,30 @@ namespace fb {
 		if (ti.rating) { it.ratingSum += ti.rating; it.rated++; }
 		if (ti.lossless) it.lossless++;
 		if (ti.peak > it.peak) it.peak = ti.peak;
+		if (!m_custom.empty()) {
+			if (it.custom.size() != m_custom.size()) it.custom.resize(m_custom.size());
+			for (size_t k = 0; k < m_custom.size(); ++k) {
+				const double v = m_custom[k][t];
+				if (std::isnan(v)) continue;
+				auto& c = it.custom[k];
+				if (c.n == 0) c.lo = c.hi = v;
+				else { if (v < c.lo) c.lo = v; if (v > c.hi) c.hi = v; }
+				c.sum += v;
+				c.n++;
+			}
+		}
+	}
+
+	bool FacetModel::customValue(size_t k, const FacetItem& it, double& out) const {
+		if (k >= it.custom.size() || k >= m_customCombine.size() || it.custom[k].n == 0) return false;
+		const auto& c = it.custom[k];
+		switch (m_customCombine[k]) {
+		case Combine::Average: out = c.sum / c.n; break;
+		case Combine::Lowest: out = c.lo; break;
+		case Combine::Highest: out = c.hi; break;
+		default: out = c.sum; break;
+		}
+		return true;
 	}
 
 	std::vector<FacetItem> FacetModel::group(size_t pane, const std::vector<uint32_t>& input) const {
@@ -423,6 +487,14 @@ namespace fb {
 		auto strOf = [&](int32_t idx, const pfc::string8 TrackInfo::* f) -> const char* { return idx < 0 ? "" : (m_info[idx].*f).c_str(); };
 		auto byStat = [&](const FacetItem& a, const FacetItem& b, Stat s) -> int {
 			auto num = [](double x, double y) { return x < y ? -1 : x > y ? 1 : 0; };
+			if (isCustomStat((uint32_t)s)) {
+				// items without a number sort below every number
+				const size_t k = (uint32_t)s - kCustomStatBase;
+				double x = 0, y = 0;
+				const bool hx = customValue(k, a, x), hy = customValue(k, b, y);
+				if (hx != hy) return hx ? 1 : -1;
+				return hx ? num(x, y) : 0;
+			}
 			switch (s) {
 			case Stat::Bitrate: return num(a.bitrateN ? (double)a.bitrateSum / a.bitrateN : 0, b.bitrateN ? (double)b.bitrateSum / b.bitrateN : 0);
 			case Stat::Duration: return num(a.duration, b.duration);
@@ -485,6 +557,10 @@ namespace fb {
 	pfc::string8 FacetModel::statText(Stat s, const FacetItem& it, size_t rowIndex) const {
 		auto str = [&](int32_t idx, const pfc::string8 TrackInfo::* f) -> pfc::string8 { return idx < 0 ? pfc::string8() : m_info[idx].*f; };
 		char buf[64];
+		if (isCustomStat((uint32_t)s)) {
+			double v;
+			return customValue((uint32_t)s - kCustomStatBase, it, v) ? formatNumber(v) : pfc::string8();
+		}
 		switch (s) {
 		case Stat::Bitrate:
 			if (!it.bitrateN) return "";

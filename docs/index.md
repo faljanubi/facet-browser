@@ -46,7 +46,7 @@ code from Facets.
 | Change what a pane shows | [Panes](panes) |
 | Understand the numbers | [Statistics](statistics) |
 | Use search, filters and actions | [Toolbar](toolbar) |
-| Add your own columns and filters | [Preferences](preferences) |
+| Add your own columns, filters and statistics | [Preferences](preferences) |
 | Copy a ready-made layout | [Example layouts](examples) |
 | Fix a problem | [FAQ & troubleshooting](faq) |
 

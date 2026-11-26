@@ -10,8 +10,10 @@ nav_order: 6
 [Library v] [Filter v] [Search..................] [Send to selection playlist v] [?]
 ```
 
-Right-click an empty part of the toolbar to hide it or move it to the top. To bring a hidden
-toolbar back, right-click a column header › **Show toolbar**.
+Right-click an empty part of the toolbar (or one of its buttons) to hide it, move it to the
+top, or hide single items: **Source button**, **Filter button**, **Search box**, **Action
+button** and **Help button**. The others close up. To bring a hidden toolbar back, right-click
+a column header › **Show toolbar**.
 
 1. TOC
 {:toc}
@@ -28,6 +30,9 @@ Chooses which tracks Facet Browser browses:
 
 With *Automatic* you browse whichever playlist you switch to, but sending results to the
 selection playlist doesn't make Facet Browser browse its own output.
+
+While a playlist is browsed, selecting items in a pane also selects the matching tracks in that
+playlist and scrolls it to the first one. Selecting *All* again clears the playlist selection.
 
 ## Filter
 

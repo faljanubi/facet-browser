@@ -20,6 +20,18 @@ namespace fb {
 	void setFilters(const std::vector<FilterDef>& v);
 	std::vector<FilterDef> defaultFilters();
 
+	// Custom statistics: a title formatting pattern evaluated per track (numbers only), combined
+	// per item as total, average, lowest or highest value.
+	enum class Combine : uint32_t { Total = 0, Average = 1, Lowest = 2, Highest = 3, Count };
+	const char* combineName(Combine c);
+	struct StatDef { pfc::string8 name, pattern; Combine combine = Combine::Total; };
+	std::vector<StatDef> getCustomStats();
+	void setCustomStats(const std::vector<StatDef>& v);
+	// Statistic ids in pane settings: built-in Stat values, or kCustomStatBase + index into getCustomStats().
+	const uint32_t kCustomStatBase = 1000;
+	const uint32_t kMaxCustomStats = 200;
+	inline bool isCustomStat(uint32_t s) { return s >= kCustomStatBase; }
+
 	pfc::string8 getSelectionPlaylist();
 	void setSelectionPlaylist(const char* s);
 	pfc::string8 getSortPattern();
@@ -32,7 +44,7 @@ namespace fb {
 	// Live panels register here so they refresh when the global settings change.
 	// Renames made on the Preferences page (old name -> new name), so panels can follow them.
 	typedef std::vector<std::pair<pfc::string8, pfc::string8>> RenameList;
-	struct GlobalsChange { RenameList columns, filters; };
+	struct GlobalsChange { RenameList columns, filters, stats; };
 	class IGlobalsListener { public: virtual void globalsChanged(const GlobalsChange& change) = 0; };
 	void registerListener(IGlobalsListener* l);
 	void unregisterListener(IGlobalsListener* l);
@@ -40,6 +52,7 @@ namespace fb {
 	// Applies a rename list to one name (all renames at once, so swapping two names works).
 	pfc::string8 applyRenames(const RenameList& renames, const pfc::string8& name);
 
-	// Opens the Facet Browser preferences page.
-	void showPreferences();
+	// Opens a Facet Browser preferences page.
+	enum class PrefsPage { General, Columns, Filters, Statistics };
+	void showPreferences(PrefsPage page = PrefsPage::General);
 }

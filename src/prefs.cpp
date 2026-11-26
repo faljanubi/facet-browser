@@ -2,9 +2,12 @@
 #include "globals.h"
 #include "resource.h"
 
+// Preferences: Media Library > Facet Browser (the Library selection settings), with child pages
+// for the global column, filter and custom statistic definitions.
+
 namespace fb {
 
-	extern const GUID guid_prefs_page;
+	extern const GUID guid_prefs_page, guid_prefs_columns, guid_prefs_filters, guid_prefs_stats;
 
 	static pfc::string8 getText(CWindow w) {
 		CString s; w.GetWindowText(s);
@@ -12,19 +15,121 @@ namespace fb {
 	}
 	static void setText(CWindow w, const char* s) { w.SetWindowText(pfc::stringcvt::string_wide_from_utf8(s)); }
 
-	// Edits a list of name/value pairs with a list box, Add/Remove/Up/Down and two edit boxes.
-	struct PairEditor {
-		std::vector<std::pair<pfc::string8, pfc::string8>> items;
+	// Pixels-per-dialog-unit helper: places controls in dialog units, so the layout follows font and DPI.
+	struct DluPlacer {
+		CWindow dlg;
+		HDWP dwp;
+		explicit DluPlacer(CWindow d) : dlg(d), dwp(BeginDeferWindowPos(24)) {}
+		~DluPlacer() { EndDeferWindowPos(dwp); }
+		void operator()(int id, int x, int y, int w, int h) {
+			CRect r(x, y, x + std::max(0, w), y + std::max(0, h));
+			::MapDialogRect(dlg, r);
+			if (CWindow c = dlg.GetDlgItem(id)) dwp = ::DeferWindowPos(dwp, c, nullptr, r.left, r.top, r.Width(), r.Height(), SWP_NOZORDER | SWP_NOACTIVATE);
+		}
+	};
+
+	// The page size in dialog units (foobar2000 sizes the page to its page area, which can be
+	// smaller than the dialog template).
+	static CSize pageDlu(CWindow dlg, int minW, int minH) {
+		CRect client; dlg.GetClientRect(client);
+		CRect unit(0, 0, 400, 400); ::MapDialogRect(dlg, unit);   // pixels per 400 dialog units
+		return CSize(std::max(minW, (int)(client.Width() * 400LL / unit.Width())), std::max(minH, (int)(client.Height() * 400LL / unit.Height())));
+	}
+
+	// ================================================================ Facet Browser (general)
+
+	class CGeneralPage : public CDialogImpl<CGeneralPage>, public preferences_page_instance {
+	public:
+		enum { IDD = IDD_PREFS };
+		CGeneralPage(preferences_page_callback::ptr cb) : m_callback(cb) {}
+
+		BEGIN_MSG_MAP_EX(CGeneralPage)
+			MSG_WM_INITDIALOG(OnInitDialog)
+			MSG_WM_SIZE(OnSize)
+			COMMAND_HANDLER_EX(IDC_SELPL, EN_CHANGE, OnEdit)
+			COMMAND_HANDLER_EX(IDC_SORT, EN_CHANGE, OnEdit)
+		END_MSG_MAP()
+
+		t_uint32 get_state() override {
+			t_uint32 s = preferences_state::resettable | preferences_state::dark_mode_supported;
+			if (m_changed) s |= preferences_state::changed;
+			return s;
+		}
+		void apply() override {
+			setSelectionPlaylist(getText(GetDlgItem(IDC_SELPL)));
+			setSortPattern(getText(GetDlgItem(IDC_SORT)));
+			m_changed = false;
+			m_callback->on_state_changed();
+			notifyGlobalsChanged();
+		}
+		void reset() override {
+			{
+				auto g = pfc::autoToggle(m_loading, true);
+				setText(GetDlgItem(IDC_SELPL), "Library selection");
+				setText(GetDlgItem(IDC_SORT), "%path_sort%");
+			}
+			Changed();
+		}
+
+	private:
+		BOOL OnInitDialog(CWindow, LPARAM) {
+			auto g = pfc::autoToggle(m_loading, true);
+			setText(GetDlgItem(IDC_SELPL), getSelectionPlaylist());
+			setText(GetDlgItem(IDC_SORT), getSortPattern());
+			setText(GetDlgItem(IDC_HELP_GENERAL),
+				"Playlist: the playlist the Send to / Add to selection playlist actions fill.\r\n"
+				"Sort pattern: the order in which tracks are sent to playlists, as title formatting.\r\n\r\n"
+				"Columns, filters and custom statistics are defined on the pages below Facet Browser.");
+			m_dark.AddDialogWithControls(*this);
+			Layout();
+			return FALSE;
+		}
+		void OnSize(UINT, CSize) { Layout(); }
+		void Layout() {
+			CRect client; GetClientRect(client);
+			if (client.IsRectEmpty()) return;
+			const CSize sz = pageDlu(*this, 240, 120);
+			const int W = sz.cx;
+			{
+				DluPlacer place(*this);
+				place(IDC_GRP_LIB, 0, 0, W, 50);
+				place(IDC_LBL_SELPL, 7, 15, 44, 8);
+				place(IDC_SELPL, 52, 13, W - 7 - 52, 13);
+				place(IDC_LBL_SORT, 7, 32, 44, 8);
+				place(IDC_SORT, 52, 30, W - 7 - 52, 13);
+				place(IDC_HELP_GENERAL, 0, 58, W, sz.cy - 58);
+			}
+			Invalidate();
+		}
+		void OnEdit(UINT, int, CWindow) { if (!m_loading) Changed(); }
+		void Changed() { m_changed = true; m_callback->on_state_changed(); }
+
+		const preferences_page_callback::ptr m_callback;
+		bool m_changed = false, m_loading = false;
+		fb2k::CDarkModeHooks m_dark;
+	};
+
+	// ================================================================ list pages
+
+	enum ListKind { kColumns, kFilters, kStats };
+
+	struct Entry { pfc::string8 name, value; Combine combine = Combine::Total; };
+
+	// Edits a list of named definitions with a list box, Add/Remove/Up/Down, two edit boxes and
+	// (custom statistics) a Combine drop-down.
+	struct ListEditor {
+		std::vector<Entry> items;
 		std::vector<pfc::string8> origin;   // per item: its name when last saved, empty for new items
 		CListBox list;
 		CWindow nameEdit, valueEdit, btnRemove, btnUp, btnDown;
+		CComboBox combine;                  // null unless custom statistics
 		bool loading = false;
 
 		void Fill() {
 			auto g = pfc::autoToggle(loading, true);
 			int sel = list.GetCurSel();
 			list.ResetContent();
-			for (auto& it : items) list.AddString(pfc::stringcvt::string_wide_from_utf8(it.first));
+			for (auto& it : items) list.AddString(pfc::stringcvt::string_wide_from_utf8(it.name));
 			if (!items.empty()) list.SetCurSel(std::max(0, std::min(sel, (int)items.size() - 1)));
 			LoadCurrent();
 		}
@@ -34,25 +139,33 @@ namespace fb {
 			const bool have = i >= 0 && i < (int)items.size();
 			nameEdit.EnableWindow(have); valueEdit.EnableWindow(have); btnRemove.EnableWindow(have);
 			btnUp.EnableWindow(have && i > 0); btnDown.EnableWindow(have && i + 1 < (int)items.size());
-			setText(nameEdit, have ? items[i].first.c_str() : "");
-			setText(valueEdit, have ? items[i].second.c_str() : "");
+			setText(nameEdit, have ? items[i].name.c_str() : "");
+			setText(valueEdit, have ? items[i].value.c_str() : "");
+			if (combine.m_hWnd) {
+				combine.EnableWindow(have);
+				combine.SetCurSel(have ? (int)items[i].combine : -1);
+			}
 		}
 		bool OnEdit(bool nameChanged) {
 			if (loading) return false;
 			int i = list.GetCurSel();
 			if (i < 0 || i >= (int)items.size()) return false;
-			items[i].first = getText(nameEdit);
-			items[i].second = getText(valueEdit);
+			items[i].name = getText(nameEdit);
+			items[i].value = getText(valueEdit);
+			if (combine.m_hWnd) {
+				const int c = combine.GetCurSel();
+				if (c >= 0 && c < (int)Combine::Count) items[i].combine = (Combine)c;
+			}
 			if (nameChanged) {
 				auto g = pfc::autoToggle(loading, true);
 				list.DeleteString(i);
-				list.InsertString(i, pfc::stringcvt::string_wide_from_utf8(items[i].first));
+				list.InsertString(i, pfc::stringcvt::string_wide_from_utf8(items[i].name));
 				list.SetCurSel(i);
 			}
 			return true;
 		}
-		void Add(const char* name, const char* value) {
-			items.emplace_back(name, value);
+		void Add(const Entry& e) {
+			items.push_back(e);
 			origin.emplace_back();
 			Fill();
 			list.SetCurSel((int)items.size() - 1);
@@ -67,17 +180,17 @@ namespace fb {
 			origin.erase(origin.begin() + i);
 			Fill();
 		}
-		void Load(const std::vector<std::pair<pfc::string8, pfc::string8>>& v, bool saved) {
+		void Load(const std::vector<Entry>& v, bool saved) {
 			items = v;
 			origin.clear();
-			for (auto& it : items) origin.push_back(saved ? it.first : pfc::string8());
+			for (auto& it : items) origin.push_back(saved ? it.name : pfc::string8());
 		}
 		// Saved items whose name changed (old -> new); then the current names count as saved.
 		RenameList TakeRenames() {
 			RenameList out;
 			for (size_t i = 0; i < items.size(); ++i)
-				if (!origin[i].is_empty() && !items[i].first.is_empty() && origin[i] != items[i].first) out.emplace_back(origin[i], items[i].first);
-			for (size_t i = 0; i < items.size(); ++i) origin[i] = items[i].first;
+				if (!origin[i].is_empty() && !items[i].name.is_empty() && origin[i] != items[i].name) out.emplace_back(origin[i], items[i].name);
+			for (size_t i = 0; i < items.size(); ++i) origin[i] = items[i].name;
 			return out;
 		}
 		void Move(int delta) {
@@ -91,24 +204,20 @@ namespace fb {
 		}
 	};
 
-	class CPrefsDialog : public CDialogImpl<CPrefsDialog>, public preferences_page_instance {
+	template<int Kind>
+	class CListPage : public CDialogImpl<CListPage<Kind>>, public preferences_page_instance {
 	public:
-		enum { IDD = IDD_PREFS };
-		CPrefsDialog(preferences_page_callback::ptr cb) : m_callback(cb) {}
+		enum { IDD = IDD_PREFS_LIST };
+		CListPage(preferences_page_callback::ptr cb) : m_callback(cb) {}
 
-		BEGIN_MSG_MAP_EX(CPrefsDialog)
+		BEGIN_MSG_MAP_EX(CListPage)
 			MSG_WM_INITDIALOG(OnInitDialog)
 			MSG_WM_SIZE(OnSize)
-			COMMAND_HANDLER_EX(IDC_COLUMNS, LBN_SELCHANGE, OnSelect)
-			COMMAND_HANDLER_EX(IDC_FILTERS, LBN_SELCHANGE, OnSelect)
-			COMMAND_HANDLER_EX(IDC_COL_NAME, EN_CHANGE, OnEdit)
-			COMMAND_HANDLER_EX(IDC_COL_PATTERN, EN_CHANGE, OnEdit)
-			COMMAND_HANDLER_EX(IDC_FLT_NAME, EN_CHANGE, OnEdit)
-			COMMAND_HANDLER_EX(IDC_FLT_QUERY, EN_CHANGE, OnEdit)
-			COMMAND_HANDLER_EX(IDC_SELPL, EN_CHANGE, OnEdit)
-			COMMAND_HANDLER_EX(IDC_SORT, EN_CHANGE, OnEdit)
-			COMMAND_RANGE_HANDLER_EX(IDC_COL_ADD, IDC_COL_DOWN, OnButton)
-			COMMAND_RANGE_HANDLER_EX(IDC_FLT_ADD, IDC_FLT_DOWN, OnButton)
+			COMMAND_HANDLER_EX(IDC_LIST, LBN_SELCHANGE, OnSelect)
+			COMMAND_HANDLER_EX(IDC_NAME, EN_CHANGE, OnEdit)
+			COMMAND_HANDLER_EX(IDC_VALUE, EN_CHANGE, OnEdit)
+			COMMAND_HANDLER_EX(IDC_COMBINE, CBN_SELCHANGE, OnEdit)
+			COMMAND_RANGE_HANDLER_EX(IDC_ADD, IDC_DOWN, OnButton)
 		END_MSG_MAP()
 
 		t_uint32 get_state() override {
@@ -118,54 +227,82 @@ namespace fb {
 		}
 
 		void apply() override {
-			std::vector<ColumnDef> cols;
-			for (auto& p : m_cols.items) if (!p.first.is_empty() && p.first != kFolderColumn) cols.push_back({ p.first, p.second });
-			std::vector<FilterDef> flts;
-			for (auto& p : m_flts.items) if (!p.first.is_empty()) flts.push_back({ p.first, p.second });
-			setColumns(cols);
-			setFilters(flts);
 			GlobalsChange change;
-			change.columns = m_cols.TakeRenames();
-			change.filters = m_flts.TakeRenames();
-			setSelectionPlaylist(getText(GetDlgItem(IDC_SELPL)));
-			setSortPattern(getText(GetDlgItem(IDC_SORT)));
+			if (Kind == kColumns) {
+				std::vector<ColumnDef> v;
+				for (auto& e : m_ed.items) if (!e.name.is_empty() && e.name != kFolderColumn) v.push_back({ e.name, e.value });
+				setColumns(v);
+				change.columns = m_ed.TakeRenames();
+			} else if (Kind == kFilters) {
+				std::vector<FilterDef> v;
+				for (auto& e : m_ed.items) if (!e.name.is_empty()) v.push_back({ e.name, e.value });
+				setFilters(v);
+				change.filters = m_ed.TakeRenames();
+			} else {
+				std::vector<StatDef> v;
+				for (auto& e : m_ed.items) if (!e.name.is_empty()) { StatDef d; d.name = e.name; d.pattern = e.value; d.combine = e.combine; v.push_back(d); }
+				setCustomStats(v);
+				change.stats = m_ed.TakeRenames();
+			}
 			m_changed = false;
 			m_callback->on_state_changed();
 			notifyGlobalsChanged(change);
 		}
 
 		void reset() override {
-			std::vector<std::pair<pfc::string8, pfc::string8>> v;
-			for (auto& c : defaultColumns()) v.emplace_back(c.name, c.pattern);
-			m_cols.Load(v, false);
-			v.clear();
-			for (auto& f : defaultFilters()) v.emplace_back(f.name, f.query);
-			m_flts.Load(v, false);
-			m_cols.Fill(); m_flts.Fill();
-			auto g = pfc::autoToggle(m_loading, true);
-			setText(GetDlgItem(IDC_SELPL), "Library selection");
-			setText(GetDlgItem(IDC_SORT), "%path_sort%");
+			m_ed.Load(Defaults(), false);
+			m_ed.Fill();
 			Changed();
 		}
 
 	private:
+		static std::vector<Entry> Defaults() {
+			std::vector<Entry> v;
+			if (Kind == kColumns) for (auto& c : defaultColumns()) v.push_back({ c.name, c.pattern });
+			else if (Kind == kFilters) for (auto& f : defaultFilters()) v.push_back({ f.name, f.query });
+			return v;   // no custom statistics by default
+		}
+		static std::vector<Entry> Current() {
+			std::vector<Entry> v;
+			if (Kind == kColumns) for (auto& c : getColumns()) v.push_back({ c.name, c.pattern });
+			else if (Kind == kFilters) for (auto& f : getFilters()) v.push_back({ f.name, f.query });
+			else for (auto& s : getCustomStats()) { Entry e; e.name = s.name; e.value = s.pattern; e.combine = s.combine; v.push_back(e); }
+			return v;
+		}
+
 		BOOL OnInitDialog(CWindow, LPARAM) {
 			auto g = pfc::autoToggle(m_loading, true);
-			m_cols.list = GetDlgItem(IDC_COLUMNS);
-			m_cols.nameEdit = GetDlgItem(IDC_COL_NAME); m_cols.valueEdit = GetDlgItem(IDC_COL_PATTERN);
-			m_cols.btnRemove = GetDlgItem(IDC_COL_REMOVE); m_cols.btnUp = GetDlgItem(IDC_COL_UP); m_cols.btnDown = GetDlgItem(IDC_COL_DOWN);
-			m_flts.list = GetDlgItem(IDC_FILTERS);
-			m_flts.nameEdit = GetDlgItem(IDC_FLT_NAME); m_flts.valueEdit = GetDlgItem(IDC_FLT_QUERY);
-			m_flts.btnRemove = GetDlgItem(IDC_FLT_REMOVE); m_flts.btnUp = GetDlgItem(IDC_FLT_UP); m_flts.btnDown = GetDlgItem(IDC_FLT_DOWN);
-			std::vector<std::pair<pfc::string8, pfc::string8>> v;
-			for (auto& c : getColumns()) v.emplace_back(c.name, c.pattern);
-			m_cols.Load(v, true);
-			v.clear();
-			for (auto& f : getFilters()) v.emplace_back(f.name, f.query);
-			m_flts.Load(v, true);
-			m_cols.Fill(); m_flts.Fill();
-			setText(GetDlgItem(IDC_SELPL), getSelectionPlaylist());
-			setText(GetDlgItem(IDC_SORT), getSortPattern());
+			const char* group = Kind == kColumns ? "Columns" : Kind == kFilters ? "Filters" : "Custom statistics";
+			const char* valueLabel = Kind == kFilters ? "Query:" : "Pattern:";
+			const char* help =
+				Kind == kColumns ? "Title formatting. %<field>% lists each value of a multi-value tag separately. "
+				                   "A | outside functions lists a track under each part, e.g. %<artist>%|%<album artist>%. "
+				                   "The built-in Folder column shows one folder level per pane.\r\n\r\n"
+				                   "Show a column in a pane from the pane's column header menu > Columns."
+				: Kind == kFilters ? "foobar2000 query syntax, e.g. %rating% IS 5 or %added% DURING LAST 1 WEEK.\r\n\r\n"
+				                     "Turn filters on with the Filter button on the toolbar."
+				: "Title formatting that gives a number for each track, e.g. %play_count% or "
+				  "$max(%play_count%,%lastfm_play_count%). Tracks without a number are skipped.\r\n\r\n"
+				  "Combine: Total adds the numbers of an item's tracks, Average gives their mean, "
+				  "Lowest and Highest the smallest and largest.\r\n\r\n"
+				  "Show a statistic in a pane from the pane's column header menu > Statistics; it can be "
+				  "sorted by like the built-in ones.";
+			setText(this->GetDlgItem(IDC_GRP_LIST), group);
+			setText(this->GetDlgItem(IDC_LBL_VALUE), valueLabel);
+			setText(this->GetDlgItem(IDC_HELP_LIST), help);
+			m_ed.list = this->GetDlgItem(IDC_LIST);
+			m_ed.nameEdit = this->GetDlgItem(IDC_NAME); m_ed.valueEdit = this->GetDlgItem(IDC_VALUE);
+			m_ed.btnRemove = this->GetDlgItem(IDC_REMOVE); m_ed.btnUp = this->GetDlgItem(IDC_UP); m_ed.btnDown = this->GetDlgItem(IDC_DOWN);
+			CComboBox combo(this->GetDlgItem(IDC_COMBINE));
+			if (Kind == kStats) {
+				for (uint32_t c = 0; c < (uint32_t)Combine::Count; ++c) combo.AddString(pfc::stringcvt::string_wide_from_utf8(combineName((Combine)c)));
+				m_ed.combine = combo;
+			} else {
+				combo.ShowWindow(SW_HIDE);
+				this->GetDlgItem(IDC_LBL_COMBINE).ShowWindow(SW_HIDE);
+			}
+			m_ed.Load(Current(), true);
+			m_ed.Fill();
 			m_dark.AddDialogWithControls(*this);
 			Layout();
 			return FALSE;
@@ -173,76 +310,55 @@ namespace fb {
 
 		void OnSize(UINT, CSize) { Layout(); }
 
-		// Fits the controls to the page area foobar2000 gives us (it is smaller than the dialog
-		// template on some setups): the Library selection group keeps its height at the bottom,
-		// Columns and Filters share the rest; edit boxes and help texts take the remaining width.
-		// All measurements are dialog units, so they follow font and DPI.
+		// One group filling the page: the list on the left (buttons below it), the fields and the
+		// help text on the right.
 		void Layout() {
-			CRect client; GetClientRect(client);
+			CRect client; this->GetClientRect(client);
 			if (client.IsRectEmpty()) return;
-			CRect unit(0, 0, 400, 400); MapDialogRect(unit);   // pixels per 400 dialog units
-			const int W = std::max(240, (int)(client.Width() * 400LL / unit.Width()));
-			const int H = std::max(180, (int)(client.Height() * 400LL / unit.Height()));
-			HDWP dwp = BeginDeferWindowPos(32);
-			auto place = [&](int id, int x, int y, int w, int h) {
-				CRect r(x, y, x + std::max(0, w), y + std::max(0, h));
-				MapDialogRect(r);
-				if (CWindow c = GetDlgItem(id)) dwp = ::DeferWindowPos(dwp, c, nullptr, r.left, r.top, r.Width(), r.Height(), SWP_NOZORDER | SWP_NOACTIVATE);
-			};
-			const int gap = 3, libH = 46;
-			const int groupH = (H - libH - 2 * gap) / 2;
+			const CSize sz = pageDlu(*this, 240, 120);
+			const int W = sz.cx, H = sz.cy;
 			const int listW = 110, rx = 124, ex = 158;   // list width, right-hand labels, edit boxes
-			struct Group { int grp, list, add, remove, up, down, lblName, name, lblValue, value, help; };
-			const Group groups[2] = {
-				{ IDC_GRP_COLS, IDC_COLUMNS, IDC_COL_ADD, IDC_COL_REMOVE, IDC_COL_UP, IDC_COL_DOWN, IDC_LBL_COL_NAME, IDC_COL_NAME, IDC_LBL_COL_PATTERN, IDC_COL_PATTERN, IDC_HELP_COLS },
-				{ IDC_GRP_FLT, IDC_FILTERS, IDC_FLT_ADD, IDC_FLT_REMOVE, IDC_FLT_UP, IDC_FLT_DOWN, IDC_LBL_FLT_NAME, IDC_FLT_NAME, IDC_LBL_FLT_QUERY, IDC_FLT_QUERY, IDC_HELP_FLT },
-			};
-			for (int g = 0; g < 2; ++g) {
-				const Group& c = groups[g];
-				const int y = g * (groupH + gap);
-				const int btnY = y + groupH - 19;
-				place(c.grp, 0, y, W, groupH);
-				place(c.list, 7, y + 12, listW, btnY - 3 - (y + 12));
-				place(c.add, 7, btnY, 38, 13);
-				place(c.remove, 47, btnY, 34, 13);
-				place(c.up, 83, btnY, 16, 13);
-				place(c.down, 101, btnY, 16, 13);
-				place(c.lblName, rx, y + 14, ex - rx - 2, 8);
-				place(c.name, ex, y + 12, W - 7 - ex, 13);
-				place(c.lblValue, rx, y + 31, ex - rx - 2, 8);
-				place(c.value, ex, y + 29, W - 7 - ex, 13);
-				place(c.help, rx, y + 46, W - 7 - rx, groupH - 46 - 4);
+			const int btnY = H - 19;
+			{
+				DluPlacer place(*this);
+				place(IDC_GRP_LIST, 0, 0, W, H);
+				place(IDC_LIST, 7, 12, listW, btnY - 3 - 12);
+				place(IDC_ADD, 7, btnY, 38, 13);
+				place(IDC_REMOVE, 47, btnY, 34, 13);
+				place(IDC_UP, 83, btnY, 16, 13);
+				place(IDC_DOWN, 101, btnY, 16, 13);
+				place(IDC_LBL_NAME, rx, 14, ex - rx - 2, 8);
+				place(IDC_NAME, ex, 12, W - 7 - ex, 13);
+				place(IDC_LBL_VALUE, rx, 31, ex - rx - 2, 8);
+				place(IDC_VALUE, ex, 29, W - 7 - ex, 13);
+				int helpY = 47;
+				if (Kind == kStats) {
+					place(IDC_LBL_COMBINE, rx, 48, ex - rx - 2, 8);
+					place(IDC_COMBINE, ex, 46, 70, 80);
+					helpY = 65;
+				}
+				place(IDC_HELP_LIST, rx, helpY, W - 7 - rx, btnY + 13 - helpY);
 			}
-			const int ly = 2 * (groupH + gap);
-			place(IDC_GRP_LIB, 0, ly, W, libH);
-			place(IDC_LBL_SELPL, 7, ly + 14, 44, 8);
-			place(IDC_SELPL, 52, ly + 12, W - 7 - 52, 13);
-			place(IDC_LBL_SORT, 7, ly + 30, 44, 8);
-			place(IDC_SORT, 52, ly + 28, W - 7 - 52, 13);
-			EndDeferWindowPos(dwp);
-			Invalidate();
+			this->Invalidate();
 		}
 
-		void OnSelect(UINT, int id, CWindow) { (id == IDC_COLUMNS ? m_cols : m_flts).LoadCurrent(); }
+		void OnSelect(UINT, int, CWindow) { m_ed.LoadCurrent(); }
 
 		void OnEdit(UINT, int id, CWindow) {
 			if (m_loading) return;
-			bool changed = true;
-			if (id == IDC_COL_NAME || id == IDC_COL_PATTERN) changed = m_cols.OnEdit(id == IDC_COL_NAME);
-			else if (id == IDC_FLT_NAME || id == IDC_FLT_QUERY) changed = m_flts.OnEdit(id == IDC_FLT_NAME);
-			if (changed) Changed();
+			if (m_ed.OnEdit(id == IDC_NAME)) Changed();
 		}
 
 		void OnButton(UINT, int id, CWindow) {
 			switch (id) {
-			case IDC_COL_ADD: m_cols.Add("New column", "%title%"); break;
-			case IDC_COL_REMOVE: m_cols.Remove(); break;
-			case IDC_COL_UP: m_cols.Move(-1); break;
-			case IDC_COL_DOWN: m_cols.Move(1); break;
-			case IDC_FLT_ADD: m_flts.Add("New filter", ""); break;
-			case IDC_FLT_REMOVE: m_flts.Remove(); break;
-			case IDC_FLT_UP: m_flts.Move(-1); break;
-			case IDC_FLT_DOWN: m_flts.Move(1); break;
+			case IDC_ADD:
+				if (Kind == kColumns) m_ed.Add({ "New column", "%title%" });
+				else if (Kind == kFilters) m_ed.Add({ "New filter", "" });
+				else m_ed.Add({ "New statistic", "%play_count%" });
+				break;
+			case IDC_REMOVE: m_ed.Remove(); break;
+			case IDC_UP: m_ed.Move(-1); break;
+			case IDC_DOWN: m_ed.Move(1); break;
 			default: return;
 			}
 			Changed();
@@ -251,17 +367,46 @@ namespace fb {
 		void Changed() { m_changed = true; m_callback->on_state_changed(); }
 
 		const preferences_page_callback::ptr m_callback;
-		PairEditor m_cols, m_flts;
+		ListEditor m_ed;
 		bool m_changed = false, m_loading = false;
 		fb2k::CDarkModeHooks m_dark;
 	};
 
-	class PrefsPage : public preferences_page_impl<CPrefsDialog> {
+	// ================================================================ registration
+
+	class GeneralPage : public preferences_page_impl<CGeneralPage> {
 	public:
 		const char* get_name() override { return "Facet Browser"; }
 		GUID get_guid() override { return guid_prefs_page; }
 		GUID get_parent_guid() override { return guid_media_library; }
 	};
 
-	static preferences_page_factory_t<PrefsPage> g_prefs_factory;
+	class ColumnsPage : public preferences_page_impl<CListPage<kColumns>> {
+	public:
+		const char* get_name() override { return "Columns"; }
+		GUID get_guid() override { return guid_prefs_columns; }
+		GUID get_parent_guid() override { return guid_prefs_page; }
+		double get_sort_priority() override { return 1; }
+	};
+
+	class FiltersPage : public preferences_page_impl<CListPage<kFilters>> {
+	public:
+		const char* get_name() override { return "Filters"; }
+		GUID get_guid() override { return guid_prefs_filters; }
+		GUID get_parent_guid() override { return guid_prefs_page; }
+		double get_sort_priority() override { return 2; }
+	};
+
+	class StatsPage : public preferences_page_impl<CListPage<kStats>> {
+	public:
+		const char* get_name() override { return "Statistics"; }
+		GUID get_guid() override { return guid_prefs_stats; }
+		GUID get_parent_guid() override { return guid_prefs_page; }
+		double get_sort_priority() override { return 3; }
+	};
+
+	static preferences_page_factory_t<GeneralPage> g_general_factory;
+	static preferences_page_factory_t<ColumnsPage> g_columns_factory;
+	static preferences_page_factory_t<FiltersPage> g_filters_factory;
+	static preferences_page_factory_t<StatsPage> g_stats_factory;
 }

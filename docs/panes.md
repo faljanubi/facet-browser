@@ -113,6 +113,11 @@ first. Text is sorted naturally, so *Disc 2* comes before *Disc 10*.
 | **Album art (no labels)** | Covers only |
 | **Summary item** | Show or hide the *All (n ...)* row |
 | **Front / Back / Disc / Artist** | Which picture the album art views use |
+| **Larger art / Smaller art** | Album art size for this pane; Ctrl+mouse wheel over the pane does the same |
+| **Reset art size** | Back to the default size |
+
+Each pane remembers its own size. Resizing the pane keeps the covers' size, as in Facets: the
+columns reflow and the grid is centred.
 
 In album art views, use the arrow keys, Page Up / Page Down, Home and End to move,
 Ctrl / Shift to select several, and Enter or double-click to run the action. Covers load in the

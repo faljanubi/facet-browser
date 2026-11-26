@@ -59,6 +59,22 @@ namespace fb {
 		Reload();
 	}
 
+	void CArtGrid::SetArtScale(uint32_t percent) {
+		if (percent == m_scale) return;
+		// keep the first visible item at the top while the size changes
+		const int anchor = m_hWnd ? FirstVisibleItem() : -1;
+		m_scale = percent;
+		Relayout();
+		if (anchor >= 0) ScrollTo(ItemRect((size_t)anchor).top);
+	}
+
+	int CArtGrid::FirstVisibleItem() const {
+		const size_t n = m_host->artCount();
+		if (n == 0 || m_itemH <= 0) return -1;
+		const int row = std::max(0, (m_scrollY - m_top) / m_itemH);
+		return (int)std::min(n - 1, (size_t)row * (size_t)std::max(1, m_cols));
+	}
+
 	void CArtGrid::SetColumns(const std::vector<std::pair<pfc::string8, bool>>& cols, int sortColumn, bool descending) {
 		if (!m_header.m_hWnd) return;
 		while (m_header.GetItemCount() > 0) m_header.DeleteItem(0);
@@ -136,22 +152,25 @@ namespace fb {
 		CRect content = ContentRect();
 		// The album art views copy the geometry of Library Tree's album art browser (the JSplitter script
 		// panel) with its default thumbnail settings. Sizes below were measured at 150% scaling (144 DPI)
-		// and scale with the DPI: a target cell of 243 px, columns stretched to fill the pane, a 13 px gap
+		// and scale with the DPI: a cell of 243 px (kept fixed and centred, as in Facets), a 13 px gap
 		// plus a 3 px frame around each cover, 13 px side margins.
 		auto px = [dpi](int at144) { return MulDiv(at144, dpi, 144); };
+		const int cell = std::max(px(40), MulDiv(px(243), (int)m_scale, 100));   // target cell, scaled by the art size setting
 		// Library Tree's scrollbar sits inside its margin, so the grid uses the full pane width;
 		// ours is a real scrollbar, which the right margin overlaps the same way.
 		const int fullW = content.Width() + ((GetStyle() & WS_VSCROLL) ? GetSystemMetrics(SM_CXVSCROLL) : 0);
 		auto fitColumns = [&](int block, int margin) {
-			m_left = margin;
+			// Like Facets: the cells keep their size and a resize only reflows the columns, with the
+			// grid centred in the pane. The covers never change size, so nothing has to be loaded again
+			// (only a pane narrower than one cell shrinks it).
 			const int panelW = std::max(1, fullW - 2 * margin);
 			m_cols = std::max(1, panelW / block);
-			const int spare = (panelW - m_cols * block) / m_cols;
-			m_itemW = std::max(10, std::min(block + spare, panelW));
+			m_itemW = std::max(10, std::min(block, panelW));
+			m_left = margin + std::max(0, (panelW - m_cols * m_itemW) / 2);
 		};
 		switch (m_mode) {
 		case Display::ArtRight:
-			m_art = MulDiv(64, dpi, 96);
+			m_art = std::max(MulDiv(24, dpi, 96), MulDiv(MulDiv(64, dpi, 96), (int)m_scale, 100));
 			m_cols = 1;
 			m_left = m_gap;
 			m_itemW = content.Width() - 2 * m_gap;
@@ -160,7 +179,7 @@ namespace fb {
 			break;
 		case Display::ArtNone: {   // Library Tree "no labels": 3 px compact gap, no frame
 			const int cov = px(3);
-			fitColumns(px(243), px(13));
+			fitColumns(cell, px(13));
 			m_side = 0;
 			m_art = std::max(10, m_itemW - cov);
 			m_inset = (m_itemW - m_art) / 2;
@@ -171,7 +190,7 @@ namespace fb {
 		default: {   // bottom labels
 			const int cov = px(13);
 			m_side = px(3);
-			fitColumns(px(243), px(13));
+			fitColumns(cell, px(13));
 			m_inset = cov + m_side;
 			m_art = std::max(10, m_itemW - 2 * m_inset);
 			m_lineH = std::max(m_lineH, px(27));
@@ -191,12 +210,34 @@ namespace fb {
 		si.nPos = m_scrollY;
 		SetScrollInfo(SB_VERT, &si, TRUE);
 		if (m_workerArt != m_art) {
-			m_workerArt = m_art;   // size changed: re-render covers sharply
-			Reload();
-			return;
+			// size changed: new covers are decoded at the new size; the ones already shown are drawn
+			// scaled until the size settles, then decoded again sharply (no flashing placeholders)
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				m_workerArt = m_art;
+			}
+			SetTimer(TIMER_RERENDER, 250);
 		}
 		QueueVisible();
 		Invalidate();
+	}
+
+	void CArtGrid::OnTimer(UINT_PTR id) {
+		if (id != TIMER_RERENDER) { SetMsgHandled(FALSE); return; }
+		KillTimer(id);
+		Rerender();
+	}
+
+	void CArtGrid::Rerender() {
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_queue.clear();
+			++m_generation;
+		}
+		// keep the current bitmaps on screen; each is replaced when its sharp version arrives
+		m_requested.assign(m_cache.size(), 0);
+		for (size_t i = 0; i < m_cache.size(); ++i) if (m_cache[i] == kNoArt) m_requested[i] = 1;   // still no art
+		QueueVisible();
 	}
 
 	CRect CArtGrid::ItemRect(size_t idx) const {
@@ -258,7 +299,16 @@ namespace fb {
 		ScrollTo(y);
 	}
 
-	BOOL CArtGrid::OnMouseWheel(UINT, short delta, CPoint) {
+	BOOL CArtGrid::OnMouseWheel(UINT flags, short delta, CPoint) {
+		if (flags & MK_CONTROL) {
+			// Ctrl+wheel: album art size, one step per wheel notch
+			m_wheel += delta;
+			const int steps = m_wheel / WHEEL_DELTA;
+			m_wheel -= steps * WHEEL_DELTA;
+			if (steps) m_host->artZoom(steps);
+			return TRUE;
+		}
+		m_wheel = 0;
 		ScrollTo(m_scrollY - delta * m_itemH / WHEEL_DELTA / 2);
 		return TRUE;
 	}
@@ -298,10 +348,17 @@ namespace fb {
 				BITMAP bm = {}; GetObject(bmp, sizeof(bm), &bm);
 				CDC mem; mem.CreateCompatibleDC(dc);
 				HBITMAP ob = mem.SelectBitmap(bmp);
-				const int x = art.left + (art.Width() - bm.bmWidth) / 2;
-				const int y = art.top + (art.Height() - bm.bmHeight) / 2;
+				// decoded for another size (the pane is being resized): draw it scaled to fit
+				int w = bm.bmWidth, h = bm.bmHeight;
+				if (w > art.Width() || h > art.Height() || (w < art.Width() && h < art.Height())) {
+					const double f = std::min((double)art.Width() / std::max(1, w), (double)art.Height() / std::max(1, h));
+					w = std::max(1, (int)(w * f + 0.5)); h = std::max(1, (int)(h * f + 0.5));
+				}
+				const int x = art.left + (art.Width() - w) / 2;
+				const int y = art.top + (art.Height() - h) / 2;
 				BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-				::AlphaBlend(dc, x, y, bm.bmWidth, bm.bmHeight, mem, 0, 0, bm.bmWidth, bm.bmHeight, bf);
+				if (w != bm.bmWidth || h != bm.bmHeight) dc.SetStretchBltMode(HALFTONE);
+				::AlphaBlend(dc, x, y, w, h, mem, 0, 0, bm.bmWidth, bm.bmHeight, bf);
 				mem.SelectBitmap(ob);
 			} else {
 				dc.FillSolidRect(art, placeholder);
@@ -491,7 +548,11 @@ namespace fb {
 		if (m_sel.size() != n) m_sel.assign(n, 0);
 		if (m_focus >= n) m_focus = 0;
 		if (m_hWnd) {
-			m_workerArt = m_art;
+			KillTimer(TIMER_RERENDER);
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				m_workerArt = m_art;
+			}
 			Relayout();
 		}
 	}
@@ -525,7 +586,9 @@ namespace fb {
 			if (r->bmp && r->bmp != kNoArt) DeleteObject(r->bmp);
 			return 0;
 		}
-		m_cache[r->index] = r->bmp;
+		HBITMAP& slot = m_cache[r->index];
+		if (slot && slot != kNoArt && slot != r->bmp) DeleteObject(slot);   // the scaled stand-in
+		slot = r->bmp;
 		CRect t = ItemRect(r->index); t.OffsetRect(0, ContentRect().top - m_scrollY);
 		InvalidateRect(t);
 		return 0;

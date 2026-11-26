@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.0.3 (2026-11-26)
+
+Settings from 1.0.2 carry over.
+
+### New
+
+- Custom statistics: define your own in *Preferences › Media Library › Facet Browser ›
+  Statistics* with a name, a title formatting pattern that gives a number per track (e.g.
+  `$max(%play_count%,%lastfm_play_count%)`) and how to combine the numbers: Total, Average,
+  Lowest or Highest. They are listed under the header menu's *Statistics* and *Sort by*, and
+  work like the built-in statistics
+- Album art size per pane: *Display › Larger art / Smaller art / Reset art size*, or
+  Ctrl+mouse wheel over an album art pane
+- Toolbar items can be hidden one by one: right-click the toolbar and untick Source button,
+  Filter button, Search box, Action button or Help button
+- With the *Playlist* source, selecting items in a pane selects the matching tracks in the
+  playlist and scrolls to the first one; *All* clears the playlist selection
+
+### Changed
+
+- The Preferences page is split up: *Facet Browser* keeps the Library selection settings,
+  and Columns, Filters and Statistics have a page each below it, with room for longer lists.
+  *Columns › Preferences* and *Filter › Preferences* open their own page
+
+### Fixed
+
+- Flicker while the panel or window is resized: the list panes were wiped to an empty
+  background before every repaint
+- Album art panes keep their cover size when the panel is resized, as in Facets: the columns
+  reflow and the grid is centred, so covers show at once instead of loading again
+
 ## 1.0.2 (2026-11-24)
 
 Settings from 1.0.1 carry over.

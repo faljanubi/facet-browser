@@ -1,5 +1,6 @@
 #pragma once
 #include "config.h"
+#include "globals.h"
 
 // Data engine: formats every pane's columns for every source track once, then groups,
 // filters and aggregates statistics cheaply from that cache.
@@ -16,6 +17,9 @@ namespace fb {
 	};
 
 	struct PaneSpec { std::vector<ColumnSpec> columns; };
+
+	// One custom statistic of an item: the numbers of its tracks combined.
+	struct CustomAgg { double sum = 0, lo = 0, hi = 0; uint32_t n = 0; };
 
 	struct FacetItem {
 		uint32_t valueId = 0;
@@ -36,12 +40,14 @@ namespace fb {
 		uint32_t subitems = 0;
 		bool hasChildren = false;                       // folder items with deeper folders
 		uint32_t firstTrack = 0;
+		std::vector<CustomAgg> custom;                  // per custom statistic (index into the model's list)
 	};
 
 	class FacetModel {
 	public:
 		// wantCreated: also read file creation times from disk (only needed for the File created stat)
-		bool build(metadb_handle_list_cref tracks, const std::vector<PaneSpec>& panes, bool wantCreated, pfc::string8& error);
+		// customs: the custom statistics (getCustomStats()); ids kCustomStatBase + index refer to them
+		bool build(metadb_handle_list_cref tracks, const std::vector<PaneSpec>& panes, bool wantCreated, const std::vector<StatDef>& customs, pfc::string8& error);
 
 		size_t paneCount() const { return m_panes.size(); }
 		size_t trackCount() const { return m_tracks.get_count(); }
@@ -60,7 +66,10 @@ namespace fb {
 		// the value ids a track has in a pane (several for multi-value and "|" columns)
 		std::vector<uint32_t> trackValues(size_t pane, uint32_t track) const;
 
+		// s: a built-in Stat, or kCustomStatBase + index of a custom statistic
 		pfc::string8 statText(Stat s, const FacetItem& it, size_t rowIndex) const;
+		// the combined value of a custom statistic; false when no track of the item has a number
+		bool customValue(size_t k, const FacetItem& it, double& out) const;
 
 		std::vector<uint32_t> allTracks() const;
 		metadb_handle_list handles(const std::vector<uint32_t>& idx) const;
@@ -85,6 +94,8 @@ namespace fb {
 		uint32_t intern(PaneValues& p, const std::vector<pfc::string8>& parts);
 		void accumulate(FacetItem& it, uint32_t t) const;
 
+		std::vector<std::vector<double>> m_custom;   // [custom statistic][track], NaN = no number
+		std::vector<Combine> m_customCombine;
 		metadb_handle_list m_tracks;
 		std::vector<PaneValues> m_panes;
 		std::vector<TrackInfo> m_info;

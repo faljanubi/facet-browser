@@ -15,6 +15,8 @@ namespace fb {
 	};
 	const char* statName(Stat s);
 	const char* statDescription(Stat s);
+	// Name of a statistic id: a built-in Stat or a custom statistic (kCustomStatBase + index).
+	pfc::string8 statLabel(uint32_t id);
 	const std::vector<uint32_t>& statMenuOrder();   // all stats, alphabetical
 
 	enum class Display : uint32_t { Columns = 0, ArtBottom = 1, ArtRight = 2, ArtNone = 3 };
@@ -48,7 +50,12 @@ namespace fb {
 		// column widths set by the user, in 96-DPI pixels; key: column name, or "stat:<n>" for a statistic.
 		// Columns without an entry share the free width.
 		std::vector<std::pair<pfc::string8, uint32_t>> widths;
+		uint32_t artScale = 100;             // album art size, percent of the default
 	};
+	const uint32_t kArtScaleMin = 40, kArtScaleMax = 300;
+
+	// Toolbar items that can be hidden (BrowserConfig::toolbarItems bits).
+	enum ToolbarItem : uint32_t { TB_SOURCE = 1, TB_FILTER = 2, TB_SEARCH = 4, TB_ACTION = 8, TB_HELP = 16, TB_ALL = 31 };
 
 	struct BrowserConfig {
 		std::vector<PaneConfig> panes;
@@ -59,6 +66,7 @@ namespace fb {
 		bool showToolbar = true;
 		bool toolbarBottom = true;
 		bool actionOnSelect = false;         // run the action whenever the selection changes (single click)
+		uint32_t toolbarItems = TB_ALL;      // ToolbarItem bits of the items shown
 
 		static BrowserConfig makeDefault();
 		static PaneConfig makePane(const char* column);

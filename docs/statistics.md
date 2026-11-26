@@ -36,6 +36,26 @@ row. The **summary item** shows the totals for the whole pane.
 | Total peak | Highest ReplayGain peak | |
 | Total size | Total file size | |
 
+## Custom statistics
+
+Define your own statistics in *Preferences › Media Library › Facet Browser › Statistics*
+(or *header menu › Statistics › Preferences*): a name, a title formatting pattern that gives a
+number for each track, and how to combine the numbers of a row's tracks.
+
+| Name | Pattern | Combine | Shows |
+|:--|:--|:--|:--|
+| Plays (all) | `$max(%play_count%,%lastfm_play_count%)` | Total | Local or Last.fm play count, whichever is higher, added up |
+| Avg BPM | `%bpm%` | Average | Average tempo |
+| Highest rating | `%rating%` | Highest | Best rating among the tracks |
+| Oldest year | `$year(%date%)` | Lowest | Earliest release year |
+| Five-star tracks | `$ifequal(%rating%,5,1,0)` | Total | Number of tracks rated 5 |
+
+- Tracks whose pattern gives no number (an empty or missing tag, or text) are skipped. Rows
+  where no track has a number stay empty.
+- `$year(%date%)` gives `0` for tracks without a date; write `[$year(%date%)]` to skip them.
+- Custom statistics are listed below the built-in ones and can be sorted by like them.
+  Rows without a number sort below every number.
+
 ## Sorting
 
 Click a statistic's column title to sort by it. Use *header menu › Sort by* to sort by a

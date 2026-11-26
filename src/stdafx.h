@@ -22,6 +22,7 @@
 #include <SDK/titleformat.h>
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <condition_variable>
 #include <functional>

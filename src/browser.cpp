@@ -110,7 +110,7 @@ namespace fb {
 
 	CFacetBrowser::CFacetBrowser(ui_element_config::ptr cfg, ui_element_instance_callback::ptr callback)
 		: playlist_callback_single_impl_base(flag_on_items_added | flag_on_items_removed | flag_on_items_modified | flag_on_items_replaced | flag_on_playlist_switch),
-		m_callback(callback), m_cfg(parseConfig(cfg)), m_searchEdit(this, 1), m_searchCombo(this, 2) {}
+		m_callback(callback), m_cfg(parseConfig(cfg)), m_searchEdit(this, 1), m_searchCombo(this, 2) { TakeCustomNames(); }
 
 	CFacetBrowser::~CFacetBrowser() {}
 
@@ -120,6 +120,7 @@ namespace fb {
 
 	void CFacetBrowser::set_configuration(ui_element_config::ptr cfg) {
 		m_cfg = parseConfig(cfg);
+		TakeCustomNames();
 		if (m_hWnd) ApplyConfig();
 	}
 
@@ -175,8 +176,7 @@ namespace fb {
 	void CFacetBrowser::ApplyConfig() {
 		DestroyPanes();
 		CreatePanes();
-		const int show = m_cfg.showToolbar ? SW_SHOWNA : SW_HIDE;
-		for (CWindow w : { (CWindow)m_btnSource, (CWindow)m_btnFilter, (CWindow)m_search, (CWindow)m_btnAction, (CWindow)m_btnHelp }) w.ShowWindow(show);
+		ShowToolbarControls();
 		UpdateToolbarText();
 		ApplyFonts();
 		ApplyColors();
@@ -184,10 +184,58 @@ namespace fb {
 		Layout();
 	}
 
+	void CFacetBrowser::TakeCustomNames() {
+		m_customNames.clear();
+		for (auto& d : getCustomStats()) m_customNames.push_back(d.name);
+	}
+
+	// The custom statistics list changed on the Preferences page: point the panes' statistic ids
+	// at the same statistics again (by name, following renames); drop the ones that were removed.
+	void CFacetBrowser::RemapCustomStats(const RenameList& renames) {
+		const auto defs = getCustomStats();
+		auto remap = [&](uint32_t id, uint32_t& out) -> bool {
+			const size_t k = id - kCustomStatBase;
+			if (k >= m_customNames.size()) return false;
+			const pfc::string8 name = applyRenames(renames, m_customNames[k]);
+			for (size_t j = 0; j < defs.size(); ++j) if (defs[j].name == name) { out = kCustomStatBase + (uint32_t)j; return true; }
+			return false;
+		};
+		for (auto& pc : m_cfg.panes) {
+			const int keys = (int)pc.columns.size();
+			for (size_t s = 0; s < pc.stats.size();) {
+				uint32_t id = pc.stats[s];
+				if (!isCustomStat(id)) { ++s; continue; }
+				const pfc::string8 oldKey = PFC_string_formatter() << "cstat:" << (id - kCustomStatBase < m_customNames.size() ? m_customNames[id - kCustomStatBase].c_str() : "");
+				if (remap(id, id)) {
+					pc.stats[s] = id;
+					for (auto& w : pc.widths) if (w.first == oldKey) w.first = PFC_string_formatter() << "cstat:" << defs[id - kCustomStatBase].name;
+					++s;
+				} else {
+					const int removed = keys + (int)s;
+					pc.stats.erase(pc.stats.begin() + s);
+					if (pc.sortStat < 0 && pc.sortColumn == removed) pc.sortColumn = 0;
+					else if (pc.sortStat < 0 && pc.sortColumn > removed) pc.sortColumn--;
+				}
+			}
+			if (pc.sortStat >= 0 && isCustomStat((uint32_t)pc.sortStat)) {
+				uint32_t id;
+				pc.sortStat = remap((uint32_t)pc.sortStat, id) ? (int32_t)id : -1;
+			}
+		}
+		TakeCustomNames();
+	}
+
+	static bool sameCustoms(const std::vector<StatDef>& a, const std::vector<StatDef>& b) {
+		if (a.size() != b.size()) return false;
+		for (size_t i = 0; i < a.size(); ++i) if (a[i].pattern != b[i].pattern || a[i].combine != b[i].combine) return false;
+		return true;
+	}
+
 	void CFacetBrowser::globalsChanged(const GlobalsChange& change) {
-		// follow columns and filters renamed on the Preferences page
+		// follow columns, filters and statistics renamed on the Preferences page
 		for (auto& pc : m_cfg.panes) for (auto& c : pc.columns) c = applyRenames(change.columns, c);
 		for (auto& f : m_cfg.filters) f = applyRenames(change.filters, f);
+		RemapCustomStats(change.stats);
 		if (!m_hWnd) return;
 		UpdateToolbarText();
 		CreatePanesKeepSelection();
@@ -222,7 +270,7 @@ namespace fb {
 		for (auto& p : m_panes) specs.push_back(p.spec);
 		bool wantCreated = false;
 		for (auto& pc : m_cfg.panes) wantCreated |= paneUsesStat(pc, Stat::FileCreated);
-		if (m_error.is_empty() && m_model.paneCount() == m_panes.size() && sameSpecs(oldSpecs, specs) && (!wantCreated || m_modelHasCreated)) Cascade(0);
+		if (m_error.is_empty() && m_model.paneCount() == m_panes.size() && sameSpecs(oldSpecs, specs) && (!wantCreated || m_modelHasCreated) && sameCustoms(m_modelCustoms, getCustomStats())) Cascade(0);
 		else RebuildSource();
 		Layout();
 	}
@@ -273,6 +321,7 @@ namespace fb {
 				pane.grid = std::make_unique<CArtGrid>(pane.art.get());
 				pane.grid->SetMode(pc.display);
 				pane.grid->SetArtType(pc.artType);
+				pane.grid->SetArtScale(pc.artScale);
 				pane.grid->Create(*this, rc0, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, IDC_PANE0 + (UINT)i);
 				m_dark.AddGeneric(*pane.grid);
 				m_dark.AddHeader(pane.grid->GetHeader());
@@ -313,7 +362,7 @@ namespace fb {
 		const auto& pc = m_cfg.panes[i];
 		std::vector<std::pair<pfc::string8, bool>> cols;
 		for (auto& c : pane.spec.columns) cols.emplace_back(c.name, false);
-		for (auto s : pc.stats) cols.emplace_back(statName((Stat)s), true);
+		for (auto s : pc.stats) cols.emplace_back(statLabel(s), true);
 		const int sortCol = sortIndicatorColumn(pc, pane.spec.columns.size());
 		if (pane.grid) { pane.grid->SetColumns(cols, sortCol, pc.sortDescending); return; }
 		if (!pane.list) return;
@@ -449,8 +498,9 @@ namespace fb {
 		CRect rc; GetClientRect(rc);
 		CRect area = rc;
 		m_toolbarRect.SetRectEmpty();
-		if (m_cfg.showToolbar) {
+		if (ToolbarShown()) {
 			const int dpi = QueryScreenDPI(*this);
+			const uint32_t items = m_cfg.toolbarItems;
 			if (m_cfg.toolbarBottom) { m_toolbarRect = CRect(rc.left, rc.bottom - m_toolbarH, rc.right, rc.bottom); area.bottom = m_toolbarRect.top; }
 			else { m_toolbarRect = CRect(rc.left, rc.top, rc.right, rc.top + m_toolbarH); area.top = m_toolbarRect.bottom; }
 			CRect bar = m_toolbarRect; bar.DeflateRect(m_gap, m_gap);
@@ -461,26 +511,35 @@ namespace fb {
 				CSize sz; dc.GetTextExtent(s, s.GetLength(), &sz);
 				return sz.cx + MulDiv(extra, dpi, 96);
 			};
-			const int wSource = textW(m_btnSource, 28), wFilter = textW(m_btnFilter, 28);
-			int wAction = textW(m_btnAction, 44);
-			const int wHelp = MulDiv(26, dpi, 96);
+			const int wSource = (items & TB_SOURCE) ? textW(m_btnSource, 28) : 0, wFilter = (items & TB_FILTER) ? textW(m_btnFilter, 28) : 0;
+			int wAction = (items & TB_ACTION) ? textW(m_btnAction, 44) : 0;
+			const int wHelp = (items & TB_HELP) ? MulDiv(26, dpi, 96) : 0;
+			const bool search = (items & TB_SEARCH) != 0;
 			dc.SelectFont(old);
+			int shown = 0;
+			for (uint32_t b = TB_SOURCE; b <= TB_HELP; b <<= 1) if (items & b) ++shown;
 			// Narrow panel: the action button gives up width first (its label gets an ellipsis),
 			// so the search box keeps a usable size and nothing overlaps.
-			{
-				const int minSearch = MulDiv(80, dpi, 96), minAction = MulDiv(44, dpi, 96);
-				const int room = bar.Width() - wSource - wFilter - wHelp - 4 * m_gap - minSearch;
+			if (wAction) {
+				const int minSearch = search ? MulDiv(80, dpi, 96) : 0, minAction = MulDiv(44, dpi, 96);
+				const int room = bar.Width() - wSource - wFilter - wHelp - (shown - 1) * m_gap - minSearch;
 				if (wAction > room) wAction = std::max(minAction, room);
 			}
+			// all toolbar items move in one go, so they repaint once
+			HDWP tb = BeginDeferWindowPos(5);
+			auto place = [&](CWindow w, int x, int y, int cx, int cy) { tb = ::DeferWindowPos(tb, w, NULL, x, y, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE); };
 			int x = bar.left;
-			m_btnSource.SetWindowPos(NULL, x, bar.top, wSource, bar.Height(), SWP_NOZORDER | SWP_NOACTIVATE); x += wSource + m_gap;
-			m_btnFilter.SetWindowPos(NULL, x, bar.top, wFilter, bar.Height(), SWP_NOZORDER | SWP_NOACTIVATE); x += wFilter + m_gap;
+			if (wSource) { place(m_btnSource, x, bar.top, wSource, bar.Height()); x += wSource + m_gap; }
+			if (wFilter) { place(m_btnFilter, x, bar.top, wFilter, bar.Height()); x += wFilter + m_gap; }
 			int right = bar.right;
-			m_btnHelp.SetWindowPos(NULL, right - wHelp, bar.top, wHelp, bar.Height(), SWP_NOZORDER | SWP_NOACTIVATE); right -= wHelp + m_gap;
-			m_btnAction.SetWindowPos(NULL, right - wAction, bar.top, wAction, bar.Height(), SWP_NOZORDER | SWP_NOACTIVATE); right -= wAction + m_gap;
-			m_search.SetWindowPos(NULL, x, bar.top, std::max(40, right - x), SearchDropHeight(bar.Height()), SWP_NOZORDER | SWP_NOACTIVATE);
-			CRect cr; m_search.GetWindowRect(cr);
-			m_search.SetWindowPos(NULL, x, bar.top + (bar.Height() - cr.Height()) / 2, std::max(40, right - x), SearchDropHeight(bar.Height()), SWP_NOZORDER | SWP_NOACTIVATE);
+			if (wHelp) { place(m_btnHelp, right - wHelp, bar.top, wHelp, bar.Height()); right -= wHelp + m_gap; }
+			if (wAction) { place(m_btnAction, right - wAction, bar.top, wAction, bar.Height()); right -= wAction + m_gap; }
+			if (search) {
+				// a drop-down combo's window rect is its closed (edit) height, whatever height it is given
+				CRect cr; m_search.GetWindowRect(cr);
+				place(m_search, x, bar.top + (bar.Height() - cr.Height()) / 2, std::max(40, right - x), SearchDropHeight(bar.Height()));
+			}
+			EndDeferWindowPos(tb);
 		}
 
 		const size_t n = m_panes.size();
@@ -526,7 +585,9 @@ namespace fb {
 	pfc::string8 CFacetBrowser::WidthKey(const PaneConfig& pc, const PaneSpec& spec, size_t col) {
 		if (col < spec.columns.size()) return spec.columns[col].name;
 		const size_t s = col - spec.columns.size();
-		return s < pc.stats.size() ? pfc::string8(PFC_string_formatter() << "stat:" << pc.stats[s]) : pfc::string8();
+		if (s >= pc.stats.size()) return pfc::string8();
+		if (isCustomStat(pc.stats[s])) return PFC_string_formatter() << "cstat:" << statLabel(pc.stats[s]);
+		return PFC_string_formatter() << "stat:" << pc.stats[s];
 	}
 
 	int CFacetBrowser::SavedWidth(size_t i, size_t col) const {
@@ -760,7 +821,7 @@ namespace fb {
 			m_cfg.multipleFilters = !m_cfg.multipleFilters;
 			if (!m_cfg.multipleFilters && m_cfg.filters.size() > 1) m_cfg.filters.resize(1);
 		} else if (cmd == 2) {
-			showPreferences();
+			showPreferences(PrefsPage::Filters);
 			return;
 		} else if (cmd >= 100 && cmd - 100 < (int)filters.size()) {
 			const auto& name = filters[cmd - 100].name;
@@ -849,19 +910,44 @@ namespace fb {
 		SetMsgHandled(FALSE);
 	}
 
+	void CFacetBrowser::ShowToolbarControls() {
+		const bool on = ToolbarShown();
+		const std::pair<CWindow, uint32_t> items[] = { { m_btnSource, TB_SOURCE }, { m_btnFilter, TB_FILTER }, { m_search, TB_SEARCH }, { m_btnAction, TB_ACTION }, { m_btnHelp, TB_HELP } };
+		for (auto it : items) if (it.first.m_hWnd) it.first.ShowWindow(on && (m_cfg.toolbarItems & it.second) ? SW_SHOWNA : SW_HIDE);
+	}
+
 	void CFacetBrowser::ShowToolbarMenu(CPoint pt) {
 		CMenu menu; menu.CreatePopupMenu();
+		CMenuDescriptionMap desc(*this);
 		menu.AppendMenu(MF_STRING | (m_cfg.showToolbar ? MF_CHECKED : 0), 1, L"Show toolbar");
 		menu.AppendMenu(MF_STRING | (m_cfg.toolbarBottom ? MF_CHECKED : 0), 2, L"Bottom-dock toolbar");
-		CMenuDescriptionMap desc(*this);
 		desc.Set(1, "Shows or hides the toolbar.");
 		desc.Set(2, "Toggles between top and bottom docking of the toolbar.");
+		menu.AppendMenu(MF_SEPARATOR);
+		struct Item { uint32_t bit; const wchar_t* label; const char* what; };
+		static const Item items[] = {
+			{ TB_SOURCE, L"Source button", "the Source button (Library / Playlist / Automatic)" },
+			{ TB_FILTER, L"Filter button", "the Filter button" },
+			{ TB_SEARCH, L"Search box", "the search box" },
+			{ TB_ACTION, L"Action button", "the action button" },
+			{ TB_HELP, L"Help button", "the ? button (query syntax help)" },
+		};
+		int shown = 0;
+		for (auto& it : items) if (m_cfg.toolbarItems & it.bit) ++shown;
+		for (UINT k = 0; k < PFC_TABSIZE(items); ++k) {
+			const bool on = (m_cfg.toolbarItems & items[k].bit) != 0;
+			// the last item shown can't be hidden; hide the whole toolbar instead
+			UINT flags = MF_STRING | (on ? MF_CHECKED : 0) | (!m_cfg.showToolbar || (on && shown == 1) ? MF_GRAYED : 0);
+			menu.AppendMenu(flags, 10 + k, items[k].label);
+			desc.Set(10 + k, PFC_string_formatter() << "Shows or hides " << items[k].what << ".");
+		}
 		int cmd = menu.TrackPopupMenuEx(TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, desc, nullptr);
 		if (cmd == 1) m_cfg.showToolbar = !m_cfg.showToolbar;
 		else if (cmd == 2) m_cfg.toolbarBottom = !m_cfg.toolbarBottom;
+		else if (cmd >= 10 && cmd < 10 + (int)PFC_TABSIZE(items)) m_cfg.toolbarItems ^= items[cmd - 10].bit;
 		else return;
-		const int show = m_cfg.showToolbar ? SW_SHOWNA : SW_HIDE;
-		for (CWindow w : { (CWindow)m_btnSource, (CWindow)m_btnFilter, (CWindow)m_search, (CWindow)m_btnAction, (CWindow)m_btnHelp }) w.ShowWindow(show);
+		if ((m_cfg.toolbarItems & TB_ALL) == 0) m_cfg.toolbarItems = TB_ALL;
+		ShowToolbarControls();
 		Layout();
 	}
 
@@ -910,7 +996,16 @@ namespace fb {
 
 	void CFacetBrowser::RebuildSource() {
 		metadb_handle_list tracks;
-		if (EffectiveSource() == Source::Playlist) playlist_manager::get()->activeplaylist_get_all_items(tracks);
+		const bool fromPlaylist = EffectiveSource() == Source::Playlist;
+		m_sourcePlaylist = pfc_infinite;
+		std::vector<size_t> positions;   // playlist source: each remaining track's position in the playlist
+		if (fromPlaylist) {
+			auto pm = playlist_manager::get();
+			m_sourcePlaylist = pm->get_active_playlist();
+			pm->activeplaylist_get_all_items(tracks);
+			positions.resize(tracks.get_count());
+			for (size_t k = 0; k < positions.size(); ++k) positions[k] = k;
+		}
 		else library_manager::get()->get_all_items(tracks);
 
 		auto applyFilter = [&](const char* query) {
@@ -920,6 +1015,11 @@ namespace fb {
 			pfc::array_t<bool> mask; mask.set_size(tracks.get_count());
 			f->test_multi(tracks, mask.get_ptr());
 			tracks.remove_mask(pfc::bit_array_not(pfc::bit_array_table(mask.get_ptr(), mask.get_size())));
+			if (!positions.empty()) {
+				size_t w = 0;
+				for (size_t k = 0; k < positions.size(); ++k) if (mask[k]) positions[w++] = positions[k];
+				positions.resize(w);
+			}
 		};
 		auto defs = getFilters();
 		for (auto& active : m_cfg.filters)
@@ -932,7 +1032,9 @@ namespace fb {
 		bool wantCreated = false;
 		for (auto& pc : m_cfg.panes) wantCreated |= paneUsesStat(pc, Stat::FileCreated);
 		m_modelHasCreated = wantCreated;
-		if (!m_model.build(tracks, specs, wantCreated, m_error)) {
+		m_sourcePositions = std::move(positions);
+		m_modelCustoms = getCustomStats();
+		if (!m_model.build(tracks, specs, wantCreated, m_modelCustoms, m_error)) {
 			for (size_t i = 0; i < m_panes.size(); ++i) { m_panes[i].items.clear(); m_panes[i].input.clear(); m_panes[i].output.clear(); RefreshPaneUI(i); }
 			Invalidate();
 			return;
@@ -1059,11 +1161,41 @@ namespace fb {
 		Cascade(i, false);
 		if (i + 1 < m_panes.size()) Cascade(i + 1);
 		PublishSelection(i);
+		SyncPlaylistSelection(i);
 		if (m_cfg.actionOnSelect && actionRunsOnSelect(m_cfg.action)) {
 			// short delay: arrow-key and drag selections settle before the playlist is filled
 			m_selectActionPane = i;
 			m_selectActionPending = true;
 			SetTimer(TIMER_SELECT_ACTION, 150);
+		}
+	}
+
+	// Playlist source: the browsed playlist's selection follows the pane's selection, and the
+	// first selected track is scrolled into view. Nothing picked in this pane or the ones before
+	// it ("All") clears the playlist selection.
+	void CFacetBrowser::SyncPlaylistSelection(size_t i) {
+		if (m_sourcePlaylist == pfc_infinite || i >= m_panes.size() || EffectiveSource() != Source::Playlist) return;
+		auto pm = playlist_manager::get();
+		const size_t pl = m_sourcePlaylist;
+		if (pm->get_active_playlist() != pl) return;
+		const size_t count = pm->playlist_get_item_count(pl);
+		bool picked = false;
+		for (size_t k = 0; k <= i; ++k) picked |= !m_panes[k].selected.empty();
+		pfc::bit_array_bittable mask(count);
+		size_t first = SIZE_MAX;
+		if (picked) {
+			for (uint32_t t : m_panes[i].output) {
+				const size_t pos = t < m_sourcePositions.size() ? m_sourcePositions[t] : SIZE_MAX;
+				// the playlist changed since the model was built (a rebuild is on its way): leave it alone
+				if (pos >= count || pm->playlist_get_item_handle(pl, pos) != m_model.track(t)) return;
+				mask.set(pos, true);
+				first = std::min(first, pos);
+			}
+		}
+		pm->playlist_set_selection(pl, pfc::bit_array_true(), mask);
+		if (first != SIZE_MAX) {
+			pm->playlist_set_focus_item(pl, first);
+			pm->playlist_ensure_visible(pl, first);
 		}
 	}
 
@@ -1202,15 +1334,18 @@ namespace fb {
 		CMD_SHOW_PLAYING = 25,
 		CMD_PANE_INSERT = 30, CMD_PANE_APPEND, CMD_PANE_REMOVE, CMD_PANE_CUT, CMD_PANE_COPY, CMD_PANE_PASTE,
 		CMD_SHOW_TOOLBAR = 40, CMD_TOOLBAR_BOTTOM,
-		CMD_COL_MULTI = 50, CMD_COL_PREFS, CMD_COL_RESET_WIDTHS,
+		CMD_COL_MULTI = 50, CMD_COL_PREFS, CMD_COL_RESET_WIDTHS, CMD_STAT_PREFS,
 		CMD_DISPLAY = 60,               // + Display
 		CMD_SUMMARY = 70,
 		CMD_ART = 80,                   // + ArtType
+		CMD_ART_LARGER = 90, CMD_ART_SMALLER, CMD_ART_RESET,
 		CMD_COLUMN = 100,               // + column index (Folder last)
 		CMD_STAT = 300,                 // + Stat
 		CMD_SORT_COL = 400,             // + key column index
 		CMD_SORT_STAT = 450,            // + Stat
 		CMD_SORT_ASC = 500, CMD_SORT_DESC,
+		CMD_CSTAT = 600,                // + custom statistic index
+		CMD_SORT_CSTAT = 800,           // + custom statistic index
 		CMD_CONTEXT = 1000,
 	};
 
@@ -1240,12 +1375,23 @@ namespace fb {
 		mCols.AppendMenu(MF_STRING, CMD_COL_PREFS, L"Preferences");
 		desc.Set(CMD_COL_PREFS, "Displays column preferences.");
 
+		const auto customs = getCustomStats();
 		CMenu mStats; mStats.CreatePopupMenu();
 		for (uint32_t s : statMenuOrder()) {
 			bool on = std::find(pc.stats.begin(), pc.stats.end(), s) != pc.stats.end();
 			mStats.AppendMenu(MF_STRING | (on ? MF_CHECKED : 0), CMD_STAT + s, pfc::stringcvt::string_wide_from_utf8(statName((Stat)s)));
 			desc.Set(CMD_STAT + s, statDescription((Stat)s));
 		}
+		if (!customs.empty()) mStats.AppendMenu(MF_SEPARATOR);
+		for (size_t k = 0; k < customs.size(); ++k) {
+			const uint32_t id = kCustomStatBase + (uint32_t)k;
+			bool on = std::find(pc.stats.begin(), pc.stats.end(), id) != pc.stats.end();
+			mStats.AppendMenu(MF_STRING | (on ? MF_CHECKED : 0), CMD_CSTAT + (UINT)k, pfc::stringcvt::string_wide_from_utf8(customs[k].name));
+			desc.Set(CMD_CSTAT + (UINT)k, PFC_string_formatter() << "Custom statistic: " << combineName(customs[k].combine) << " of " << customs[k].pattern);
+		}
+		mStats.AppendMenu(MF_SEPARATOR);
+		mStats.AppendMenu(MF_STRING, CMD_STAT_PREFS, L"Preferences");
+		desc.Set(CMD_STAT_PREFS, "Defines custom statistics.");
 
 		// Sort by: any key column or any statistic, displayed or not
 		CMenu mSort; mSort.CreatePopupMenu();
@@ -1256,14 +1402,20 @@ namespace fb {
 				mSort.AppendMenu(MF_STRING, CMD_SORT_COL + (UINT)c, pfc::stringcvt::string_wide_from_utf8(pc.columns[c]));
 				desc.Set(CMD_SORT_COL + (UINT)c, PFC_string_formatter() << "Sorts this pane by \"" << pc.columns[c] << "\".");
 			}
-			if (pc.sortStat >= 0) current = CMD_SORT_STAT + (UINT)pc.sortStat;
+			auto statCmd = [](uint32_t s) { return isCustomStat(s) ? CMD_SORT_CSTAT + (UINT)(s - kCustomStatBase) : CMD_SORT_STAT + (UINT)s; };
+			if (pc.sortStat >= 0) current = statCmd((uint32_t)pc.sortStat);
 			else if (pc.sortColumn >= 0 && pc.sortColumn < (int)keys) current = CMD_SORT_COL + (UINT)pc.sortColumn;
-			else if (pc.sortColumn >= (int)keys && pc.sortColumn - keys < pc.stats.size()) current = CMD_SORT_STAT + pc.stats[pc.sortColumn - keys];
+			else if (pc.sortColumn >= (int)keys && pc.sortColumn - keys < pc.stats.size()) current = statCmd(pc.stats[pc.sortColumn - keys]);
 			mSort.AppendMenu(MF_SEPARATOR);
 			for (uint32_t s : statMenuOrder()) {
 				if (s == (uint32_t)Stat::Index) continue;
 				mSort.AppendMenu(MF_STRING, CMD_SORT_STAT + s, pfc::stringcvt::string_wide_from_utf8(statName((Stat)s)));
 				desc.Set(CMD_SORT_STAT + s, PFC_string_formatter() << "Sorts this pane by the \"" << statName((Stat)s) << "\" statistic, even when it is not displayed.");
+			}
+			if (!customs.empty()) mSort.AppendMenu(MF_SEPARATOR);
+			for (size_t k = 0; k < customs.size(); ++k) {
+				mSort.AppendMenu(MF_STRING, CMD_SORT_CSTAT + (UINT)k, pfc::stringcvt::string_wide_from_utf8(customs[k].name));
+				desc.Set(CMD_SORT_CSTAT + (UINT)k, PFC_string_formatter() << "Sorts this pane by the \"" << customs[k].name << "\" custom statistic, even when it is not displayed.");
 			}
 			if (current) mSort.CheckMenuRadioItem(current, current, current, MF_BYCOMMAND);
 			mSort.AppendMenu(MF_SEPARATOR);
@@ -1286,6 +1438,13 @@ namespace fb {
 		const UINT artFlags = pc.display == Display::Columns ? MF_GRAYED : 0;
 		for (UINT a = 0; a < 4; ++a) mDisplay.AppendMenu(MF_STRING | artFlags, CMD_ART + a, arts[a]);
 		mDisplay.CheckMenuRadioItem(CMD_ART, CMD_ART + 3, CMD_ART + (UINT)pc.artType, MF_BYCOMMAND);
+		mDisplay.AppendMenu(MF_SEPARATOR);
+		mDisplay.AppendMenu(MF_STRING | artFlags | (pc.artScale >= kArtScaleMax ? MF_GRAYED : 0), CMD_ART_LARGER, L"Larger art\tCtrl+Wheel up");
+		mDisplay.AppendMenu(MF_STRING | artFlags | (pc.artScale <= kArtScaleMin ? MF_GRAYED : 0), CMD_ART_SMALLER, L"Smaller art\tCtrl+Wheel down");
+		mDisplay.AppendMenu(MF_STRING | artFlags | (pc.artScale == 100 ? MF_GRAYED : 0), CMD_ART_RESET, L"Reset art size");
+		desc.Set(CMD_ART_LARGER, "Makes the album art in this pane larger. Ctrl+mouse wheel over the pane does the same.");
+		desc.Set(CMD_ART_SMALLER, "Makes the album art in this pane smaller. Ctrl+mouse wheel over the pane does the same.");
+		desc.Set(CMD_ART_RESET, PFC_string_formatter() << "Back to the default album art size (now " << pc.artScale << "%).");
 
 		menu.AppendMenu(MF_POPUP, (UINT_PTR)mCols.Detach(), L"Columns");
 		menu.AppendMenu(MF_POPUP, (UINT_PTR)mStats.Detach(), L"Statistics");
@@ -1333,10 +1492,13 @@ namespace fb {
 		} else if (cmd == CMD_COL_RESET_WIDTHS) {
 			pc.widths.clear();
 		} else if (cmd == CMD_COL_PREFS) {
-			showPreferences();
+			showPreferences(PrefsPage::Columns);
 			return false;
-		} else if (cmd >= CMD_STAT && cmd < CMD_STAT + (int)Stat::Count) {
-			uint32_t s = (uint32_t)(cmd - CMD_STAT);
+		} else if (cmd == CMD_STAT_PREFS) {
+			showPreferences(PrefsPage::Statistics);
+			return false;
+		} else if ((cmd >= CMD_STAT && cmd < CMD_STAT + (int)Stat::Count) || (cmd >= CMD_CSTAT && cmd < CMD_CSTAT + (int)kMaxCustomStats)) {
+			const uint32_t s = cmd >= CMD_CSTAT ? kCustomStatBase + (uint32_t)(cmd - CMD_CSTAT) : (uint32_t)(cmd - CMD_STAT);
 			auto it = std::find(pc.stats.begin(), pc.stats.end(), s);
 			if (it != pc.stats.end()) {
 				int removed = (int)(pc.columns.size() + (it - pc.stats.begin()));
@@ -1347,8 +1509,8 @@ namespace fb {
 		} else if (cmd >= CMD_SORT_COL && cmd < CMD_SORT_COL + (int)pc.columns.size()) {
 			pc.sortColumn = cmd - CMD_SORT_COL;
 			pc.sortStat = -1;
-		} else if (cmd >= CMD_SORT_STAT && cmd < CMD_SORT_STAT + (int)Stat::Count) {
-			const uint32_t s = (uint32_t)(cmd - CMD_SORT_STAT);
+		} else if ((cmd >= CMD_SORT_STAT && cmd < CMD_SORT_STAT + (int)Stat::Count) || (cmd >= CMD_SORT_CSTAT && cmd < CMD_SORT_CSTAT + (int)kMaxCustomStats)) {
+			const uint32_t s = cmd >= CMD_SORT_CSTAT ? kCustomStatBase + (uint32_t)(cmd - CMD_SORT_CSTAT) : (uint32_t)(cmd - CMD_SORT_STAT);
 			auto it = std::find(pc.stats.begin(), pc.stats.end(), s);
 			if (it != pc.stats.end()) { pc.sortColumn = (int32_t)(pc.columns.size() + (it - pc.stats.begin())); pc.sortStat = -1; }
 			else pc.sortStat = (int32_t)s;
@@ -1470,6 +1632,9 @@ namespace fb {
 			Cascade(i, false); if (i + 1 < m_panes.size()) Cascade(i + 1);
 			return;
 		case CMD_SHOW_PLAYING: ShowNowPlaying(); return;
+		case CMD_ART_LARGER: ZoomArt(i, 1); return;
+		case CMD_ART_SMALLER: ZoomArt(i, -1); return;
+		case CMD_ART_RESET: ZoomArt(i, 0); return;
 		case CMD_PANE_INSERT: InsertPane(i, BrowserConfig::makePane("Genre")); return;
 		case CMD_PANE_APPEND: InsertPane(i + 1, BrowserConfig::makePane("Genre")); return;
 		case CMD_PANE_REMOVE: RemovePane(i); return;
@@ -1478,7 +1643,7 @@ namespace fb {
 		case CMD_PANE_PASTE: PastePane(GetKeyState(VK_SHIFT) < 0 ? i + 1 : i); return;
 		case CMD_SHOW_TOOLBAR:
 			m_cfg.showToolbar = !m_cfg.showToolbar;
-			for (CWindow w : { (CWindow)m_btnSource, (CWindow)m_btnFilter, (CWindow)m_search, (CWindow)m_btnAction, (CWindow)m_btnHelp }) w.ShowWindow(m_cfg.showToolbar ? SW_SHOWNA : SW_HIDE);
+			ShowToolbarControls();
 			Layout();
 			return;
 		}
@@ -1486,6 +1651,19 @@ namespace fb {
 	}
 
 	// ================================================================ panes
+
+	void CFacetBrowser::ZoomArt(size_t i, int steps) {
+		if (i >= m_panes.size() || !m_panes[i].grid) return;
+		auto& pc = m_cfg.panes[i];
+		const double v = steps == 0 ? 100.0 : pc.artScale * std::pow(1.1, steps);
+		uint32_t scale = (uint32_t)std::lround(v);
+		if (steps > 0 && scale <= pc.artScale) scale = pc.artScale + 1;
+		if (steps < 0 && scale >= pc.artScale) scale = pc.artScale - 1;
+		// land on 100% exactly when passing it, so the default size is easy to get back to
+		if ((pc.artScale < 100 && scale > 100) || (pc.artScale > 100 && scale < 100)) scale = 100;
+		pc.artScale = std::max(kArtScaleMin, std::min(kArtScaleMax, scale));
+		m_panes[i].grid->SetArtScale(pc.artScale);
+	}
 
 	void CFacetBrowser::InsertPane(size_t at, const PaneConfig& p) {
 		at = std::min(at, m_cfg.panes.size());
@@ -1892,6 +2070,7 @@ namespace fb {
 			m_lastPane = i;
 		}
 		if (m_focusPane < m_panes.size()) PublishSelection(m_focusPane);
+		SyncPlaylistSelection(m_lastPane);
 		return true;
 	}
 

@@ -20,6 +20,7 @@ namespace fb {
 		virtual ui_element_instance_callback::ptr artCallback() = 0;
 		virtual bool artKeyDown(UINT) { return false; }       // true: key handled by the host (pane shortcuts)
 		virtual void artFocusChanged(bool) {}                 // the grid got (true) or lost (false) the keyboard focus
+		virtual void artZoom(int) {}                          // Ctrl+mouse wheel: +1 larger, -1 smaller
 	};
 
 	class CArtGrid : public CWindowImpl<CArtGrid> {
@@ -46,6 +47,7 @@ namespace fb {
 			MSG_WM_GETDLGCODE(OnGetDlgCode)
 			MSG_WM_SETFOCUS(OnSetFocus)
 			MSG_WM_KILLFOCUS(OnKillFocus)
+			MSG_WM_TIMER(OnTimer)
 			NOTIFY_CODE_HANDLER_EX(HDN_ITEMCLICK, OnHeaderClick)
 			NOTIFY_CODE_HANDLER_EX(NM_CUSTOMDRAW, OnHeaderCustomDraw)
 			MESSAGE_HANDLER_EX(WM_ART_LOADED, OnArtLoaded)
@@ -56,6 +58,7 @@ namespace fb {
 		void SetHeaderFont(HFONT f);
 		void SetMode(Display d) { m_mode = d; Relayout(); }
 		void SetArtType(ArtType t);
+		void SetArtScale(uint32_t percent);   // album art size, percent of the default
 		void ColorsChanged() { Invalidate(); if (m_header.m_hWnd) m_header.Invalidate(); }
 		void SetColumns(const std::vector<std::pair<pfc::string8, bool>>& cols, int sortColumn, bool descending);   // title, right-aligned
 		CHeaderCtrl GetHeader() const { return m_header; }
@@ -69,6 +72,12 @@ namespace fb {
 	private:
 		void FitHeader();
 		enum { WM_ART_LOADED = WM_APP + 41 };
+		// After a resize the covers on screen are drawn scaled; they are decoded again at the new
+		// size once the size has stopped changing for a moment.
+		enum { TIMER_RERENDER = 1 };
+		void OnTimer(UINT_PTR id);
+		void Rerender();
+		int FirstVisibleItem() const;
 		struct Result { uint32_t generation; size_t index; HBITMAP bmp; };
 
 		int OnCreate(LPCREATESTRUCT);
@@ -116,6 +125,8 @@ namespace fb {
 		size_t m_focus = 0, m_anchor = 0;
 		int m_art = 120, m_lineH = 16, m_lines = 1, m_gap = 8, m_cols = 1, m_rows = 0, m_scrollY = 0, m_contentH = 0;
 		int m_itemW = 0, m_itemH = 0, m_headerH = 0;
+		uint32_t m_scale = 100;
+		int m_wheel = 0;   // Ctrl+wheel movement not yet turned into a size step
 		// grid geometry (bottom labels / no labels follow Library Tree's album art view)
 		int m_left = 0, m_top = 0, m_inset = 0, m_side = 0, m_labelGap = 0;
 

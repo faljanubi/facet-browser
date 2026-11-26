@@ -21,6 +21,7 @@ namespace fb {
 		typedef CListControlFb2kColorsUIElem<CListControlOwnerData> TBase;
 		BEGIN_MSG_MAP_EX(CPaneList)
 			MSG_WM_NCHITTEST(OnNcHitTest)
+			MSG_WM_ERASEBKGND(OnEraseBkgnd)
 			NOTIFY_CODE_HANDLER_EX(HDN_ENDTRACKW, OnHeaderResized)
 			NOTIFY_CODE_HANDLER_EX(HDN_DIVIDERDBLCLICKW, OnHeaderResized)
 			NOTIFY_CODE_HANDLER_EX(NM_CUSTOMDRAW, OnHeaderDraw)
@@ -33,6 +34,10 @@ namespace fb {
 		// Let the parent handle the mouse right next to a divider, so the thin line is easy to grab.
 		LRESULT OnNcHitTest(CPoint pt) { if (isSplitterZone && isSplitterZone(pt)) return HTTRANSPARENT; SetMsgHandled(FALSE); return 0; }
 		LRESULT OnHeaderDraw(LPNMHDR hdr);
+		// libPPUI erases the whole list to the background colour before every paint, so each resize
+		// step showed an empty pane for a moment (flicker). Its WM_PAINT already fills the background
+		// in an off-screen buffer, so the erase is skipped.
+		BOOL OnEraseBkgnd(CDCHandle) { return TRUE; }
 		void OnFocusIn(CWindow) { if (focusChanged) focusChanged(true); SetMsgHandled(FALSE); }
 		void OnFocusOut(CWindow) { if (focusChanged) focusChanged(false); SetMsgHandled(FALSE); }
 		LRESULT OnHeaderResized(LPNMHDR hdr) {
@@ -138,6 +143,7 @@ namespace fb {
 			void artHeaderClick(size_t col) override { if (!dead) owner->OnHeaderClick(pane, col); }
 			ui_element_instance_callback::ptr artCallback() override { return owner->m_callback; }
 			bool artKeyDown(UINT ch) override { return !dead && owner->PaneKeyDown(pane, ch); }
+			void artZoom(int steps) override { if (!dead) owner->ZoomArt(pane, steps); }
 			void artFocusChanged(bool got) override { if (!dead) owner->OnPaneFocus(pane, got); }
 		};
 
@@ -203,6 +209,8 @@ namespace fb {
 		void FillSearchHistory();
 		pfc::string8 SearchText() const;
 		void ShowToolbarMenu(CPoint pt);
+		bool ToolbarShown() const { return m_cfg.showToolbar && (m_cfg.toolbarItems & TB_ALL) != 0; }
+		void ShowToolbarControls();   // shows the toolbar items that are switched on
 
 		// building
 		void CreatePanes();
@@ -215,6 +223,16 @@ namespace fb {
 		std::vector<PaneSpec> ResolveSpecs() const;
 		Source EffectiveSource() const;
 		void RebuildSource();
+		// Source = Playlist: the playlist the model was built from, and each model track's position in it
+		size_t m_sourcePlaylist = pfc_infinite;
+		std::vector<size_t> m_sourcePositions;
+		void SyncPlaylistSelection(size_t pane);
+		// custom statistics the model was built with / the pane settings' ids refer to
+		std::vector<StatDef> m_modelCustoms;
+		std::vector<pfc::string8> m_customNames;
+		void TakeCustomNames();
+		void RemapCustomStats(const RenameList& renames);
+		void ZoomArt(size_t pane, int steps);   // steps > 0: larger; 0: reset
 		void Cascade(size_t fromPane, bool regroupFirst = true);
 		void RefreshPaneUI(size_t i);
 		void UpdateColumns(size_t i);

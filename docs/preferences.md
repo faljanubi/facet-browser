@@ -6,15 +6,18 @@ nav_order: 7
 # Preferences
 {: .no_toc }
 
-Open *File › Preferences › Media Library › Facet Browser*, or use *header menu › Columns ›
-Preferences* or *Filter › Preferences*. These settings are shared by every Facet Browser panel.
+Open *File › Preferences › Media Library › Facet Browser*. It has three pages below it:
+**Columns**, **Filters** and **Statistics**. *Header menu › Columns › Preferences*,
+*header menu › Statistics › Preferences* and *Filter › Preferences* open the matching page
+directly. These settings are shared by every Facet Browser panel.
 
 1. TOC
 {:toc}
 
 ## Columns
 
-The list on the left holds the column definitions shown in *header menu › Columns*.
+*Preferences › Media Library › Facet Browser › Columns*. The list on the left holds the column
+definitions shown in *header menu › Columns*.
 
 - Select a column to edit its **Name** and **Pattern**.
 - **Add new** creates a column, **Remove** deletes the selected one.
@@ -45,7 +48,8 @@ Write a field as `%<field>%` to list each value of a multi-value tag on its own.
 
 ## Filters
 
-This list holds the saved filters shown under the toolbar's **Filter** button.
+*Preferences › Media Library › Facet Browser › Filters*. This list holds the saved filters shown
+under the toolbar's **Filter** button.
 
 - Each filter has a **Name** and a **Query** in
   [foobar2000 query syntax](https://wiki.hydrogenaud.io/index.php?title=Foobar2000:Query_syntax),
@@ -62,7 +66,23 @@ More example queries:
 | Unrated | `%rating% MISSING` |
 | FLAC only | `%codec% IS FLAC` |
 
+## Statistics
+
+*Preferences › Media Library › Facet Browser › Statistics* holds your **custom statistics**.
+They appear in *header menu › Statistics* and *Sort by*, below the built-in ones.
+
+- **Name**: the column title.
+- **Pattern**: title formatting that gives a number for each track. Tracks without a number
+  (empty, or text) are skipped.
+- **Combine**: how the numbers of a row's tracks become one value: **Total**, **Average**,
+  **Lowest** or **Highest**.
+
+Renaming a statistic keeps it in the panes that show it; removing it removes its column.
+See [Custom statistics](statistics#custom-statistics) for examples.
+
 ## Library selection
+
+The *Facet Browser* page itself.
 
 | Setting | Default | Meaning |
 |:--|:--|:--|
@@ -72,4 +92,5 @@ More example queries:
 For example, `%album artist% | %date% | %album% | %discnumber% | %tracknumber%` sorts by artist,
 then by album release date, then by track order.
 
-**Reset page** at the bottom of the window restores the default columns, filters and settings.
+**Reset page** at the bottom of the window restores the defaults of the page you're on (custom
+statistics: none).
