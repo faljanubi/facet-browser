@@ -3,6 +3,7 @@
 
 namespace fb {
 
+
 	// {F3AE6A91-882B-4737-B944-2D787217AF90}
 	static const GUID guid_element = { 0xf3ae6a91, 0x882b, 0x4737, { 0xb9, 0x44, 0x2d, 0x78, 0x72, 0x17, 0xaf, 0x90 } };
 	static const wchar_t* const kHelpUrl = L"https://wiki.hydrogenaud.io/index.php?title=Foobar2000:Query_syntax";
@@ -233,7 +234,24 @@ namespace fb {
 
 	void CFacetBrowser::globalsChanged(const GlobalsChange& change) {
 		// follow columns, filters and statistics renamed on the Preferences page
-		for (auto& pc : m_cfg.panes) for (auto& c : pc.columns) c = applyRenames(change.columns, c);
+		for (auto& pc : m_cfg.panes) {
+			for (auto& c : pc.columns) c = applyRenames(change.columns, c);
+			// saved widths are keyed by column key too (statistics have their own "stat:" keys)
+			for (auto& w : pc.widths) if (strncmp(w.first, "stat:", 5) && strncmp(w.first, "cstat:", 6)) w.first = applyRenames(change.columns, w.first);
+			// Forget columns removed in Preferences (one is kept, so the pane still has a column). Left in,
+			// they would still count as columns: "Multiple columns" would stay ticked and the sort
+			// column, which counts key columns, would point one place off.
+			ColumnDef unused;
+			for (size_t c = 0; c < pc.columns.size() && pc.columns.size() > 1;) {
+				if (pc.columns[c] == kFolderColumn || findColumn(pc.columns[c], unused)) { ++c; continue; }
+				pc.columns.erase(pc.columns.begin() + c);
+				if (pc.sortStat < 0) {
+					if (pc.sortColumn > (int32_t)c) pc.sortColumn--;
+					else if (pc.sortColumn == (int32_t)c) pc.sortColumn = 0;
+				}
+			}
+			pc.widths.erase(std::remove_if(pc.widths.begin(), pc.widths.end(), [](const std::pair<pfc::string8, uint32_t>& w) { return w.first.find_first('\t') != pfc_infinite && columnKeyName(w.first).is_empty(); }), pc.widths.end());
+		}
 		for (auto& f : m_cfg.filters) f = applyRenames(change.filters, f);
 		RemapCustomStats(change.stats);
 		if (!m_hWnd) return;
@@ -255,10 +273,44 @@ namespace fb {
 		return true;
 	}
 
+	// A row's identity that survives rebuilding the panes: its value key, or a marker for the summary item.
+	pfc::string8 CFacetBrowser::RowKey(size_t pane, size_t row) const {
+		if (IsSummaryRow(pane, row)) return "\x01summary";
+		const FacetItem* it = RowItem(pane, row);
+		return it ? m_model.valueKey(pane, it->valueId) : pfc::string8();
+	}
+
+	std::unordered_map<std::string, size_t> CFacetBrowser::RowsByKey(size_t pane) const {
+		std::unordered_map<std::string, size_t> rows;
+		const size_t n = RowCount(pane);
+		rows.reserve(n);
+		for (size_t r = 0; r < n; ++r) { const pfc::string8 k = RowKey(pane, r); rows.emplace(std::string(k.c_str(), k.length()), r); }
+		return rows;
+	}
+
 	void CFacetBrowser::CreatePanesKeepSelection() {
 		std::vector<std::vector<pfc::string8>> sel;
 		std::vector<PaneSpec> oldSpecs;
 		for (auto& p : m_panes) { sel.push_back(p.selected); oldSpecs.push_back(p.spec); }
+		// The panes are created again below. Keep what each one showed: the item at its top and, for album
+		// art, the covers already loaded, so unchanged panes don't jump to the top or load every cover again.
+		struct Kept { pfc::string8 top; CArtGrid::Covers covers; std::vector<pfc::string8> coverKeys; };
+		std::vector<Kept> kept(m_panes.size());
+		for (size_t i = 0; i < m_panes.size(); ++i) {
+			auto& p = m_panes[i];
+			if (p.list && p.list->m_hWnd) {
+				const size_t n = std::min(RowCount(i), p.list->GetItemCount());
+				const int ih = n > 0 ? p.list->GetItemRectAbs(0).Height() : 0;   // rows are all the same height
+				const int y = p.list->GetViewOrigin().y - (n > 0 ? p.list->GetItemRectAbs(0).top : 0);
+				if (ih > 0 && y > 0) kept[i].top = RowKey(i, std::min(n - 1, (size_t)(y / ih)));
+			}
+			if (p.grid && p.grid->m_hWnd) {
+				const int first = p.grid->FirstVisibleItem();
+				if (first > 0) kept[i].top = RowKey(i, (size_t)first);
+				kept[i].covers = p.grid->DetachCovers();
+				for (auto& c : kept[i].covers.items) kept[i].coverKeys.push_back(c.first < RowCount(i) ? RowKey(i, c.first) : pfc::string8());
+			}
+		}
 		DestroyPanes();
 		CreatePanes();
 		for (size_t i = 0; i < m_panes.size() && i < sel.size(); ++i) m_panes[i].selected = sel[i];
@@ -270,9 +322,49 @@ namespace fb {
 		for (auto& p : m_panes) specs.push_back(p.spec);
 		bool wantCreated = false;
 		for (auto& pc : m_cfg.panes) wantCreated |= paneUsesStat(pc, Stat::FileCreated);
-		if (m_error.is_empty() && m_model.paneCount() == m_panes.size() && sameSpecs(oldSpecs, specs) && (!wantCreated || m_modelHasCreated) && sameCustoms(m_modelCustoms, getCustomStats())) Cascade(0);
+		const bool reusable = m_error.is_empty() && m_model.paneCount() == m_panes.size() && oldSpecs.size() == specs.size()
+			&& (!wantCreated || m_modelHasCreated) && sameCustoms(m_modelCustoms, getCustomStats());
+		if (reusable && sameSpecs(oldSpecs, specs)) Cascade(0);
+		else if (reusable) {
+			// New columns in some panes (e.g. Date -> Genre): read just those columns again and keep
+			// everything else, instead of reading the whole library (slow on very large libraries).
+			std::vector<char> changed(specs.size(), 0);
+			for (size_t i = 0; i < specs.size(); ++i) changed[i] = sameSpecs({ oldSpecs[i] }, { specs[i] }) ? 0 : 1;
+			if (m_model.rebuildPanes(specs, changed, m_error)) Cascade(0);
+			else if (!m_error.is_empty()) {
+				for (size_t i = 0; i < m_panes.size(); ++i) { m_panes[i].items.clear(); m_panes[i].input.clear(); m_panes[i].output.clear(); RefreshPaneUI(i); }
+				Invalidate();
+			} else RebuildSource();
+		}
 		else RebuildSource();
 		Layout();
+		// give the new panes back their top item and loaded covers (matched by value, so a pane whose own
+		// columns changed simply starts at the top)
+		for (size_t i = 0; i < kept.size(); ++i) {
+			Kept& k = kept[i];
+			Pane* p = i < m_panes.size() ? &m_panes[i] : nullptr;
+			std::unordered_map<std::string, size_t> rows;
+			if (p && (!k.top.is_empty() || !k.covers.items.empty())) rows = RowsByKey(i);
+			auto rowOf = [&](const pfc::string8& key) -> size_t {
+				auto it = rows.find(std::string(key.c_str(), key.length()));
+				return it == rows.end() ? SIZE_MAX : it->second;
+			};
+			// scroll first, so covers that need decoding again at a new size are the ones on screen
+			if (p && !k.top.is_empty()) {
+				const size_t r = rowOf(k.top);
+				if (r != SIZE_MAX) {
+					if (p->grid) p->grid->ScrollToItem(r);
+					else if (p->list) p->list->MoveViewOrigin(CPoint(p->list->GetViewOrigin().x, p->list->GetItemRectAbs(r).top));
+				}
+			}
+			if (!k.covers.items.empty()) {
+				if (p && p->grid) {
+					CArtGrid::Covers mapped = k.covers;
+					for (size_t c = 0; c < mapped.items.size(); ++c) mapped.items[c].first = k.coverKeys[c].is_empty() ? SIZE_MAX : rowOf(k.coverKeys[c]);
+					p->grid->AdoptCovers(mapped);
+				} else CArtGrid::FreeCovers(k.covers);
+			}
+		}
 	}
 
 	std::vector<PaneSpec> CFacetBrowser::ResolveSpecs() const {
@@ -281,17 +373,18 @@ namespace fb {
 		for (auto& pc : m_cfg.panes) {
 			PaneSpec spec;
 			bool folderHere = false;
-			for (auto& name : pc.columns) {
+			for (auto& key : pc.columns) {
 				ColumnSpec cs;
-				cs.name = name;
-				if (name == kFolderColumn) {
+				cs.key = key;
+				cs.name = columnKeyName(key);
+				if (key == kFolderColumn) {
 					if (folderHere) continue;   // one folder level per pane
 					folderHere = true;
 					cs.folder = true;
 					cs.depth = depth + 1;
 				} else {
 					ColumnDef def;
-					if (!findColumn(name, def)) continue;   // column was removed in Preferences
+					if (!findColumn(key, def)) continue;   // column was removed in Preferences
 					cs.pattern = def.pattern;
 					cs.markers = patternHasMarkers(def.pattern);
 				}
@@ -299,7 +392,7 @@ namespace fb {
 			}
 			if (folderHere) depth++;
 			if (spec.columns.empty()) {
-				ColumnSpec cs; cs.name = "Title"; cs.pattern = "%title%";
+				ColumnSpec cs; cs.name = cs.key = "Title"; cs.pattern = "%title%";
 				spec.columns.push_back(cs);
 			}
 			specs.push_back(spec);
@@ -357,6 +450,20 @@ namespace fb {
 		return pc.sortStat == (int32_t)s || std::find(pc.stats.begin(), pc.stats.end(), (uint32_t)s) != pc.stats.end();
 	}
 
+	// Width a column needs for its title: measured in the header's own font (not the list's), plus the
+	// header's text margins.
+	static uint32_t HeaderTextWidth(CListControl& list, const char* title) {
+		CHeaderCtrl hdr = list.GetHeaderCtrl();
+		if (!hdr.m_hWnd) return list.GetOptimalColumnWidthFixed(title);
+		CClientDC dc(hdr);
+		HFONT f = hdr.GetFont();
+		HFONT old = dc.SelectFont(f ? f : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+		pfc::stringcvt::string_wide_from_utf8 w(title);
+		CSize sz; dc.GetTextExtent(w, (int)wcslen(w), &sz);
+		dc.SelectFont(old);
+		return (uint32_t)(sz.cx + MulDiv(14, list.GetDPI().cx, 96));
+	}
+
 	void CFacetBrowser::UpdateColumns(size_t i) {
 		auto& pane = m_panes[i];
 		const auto& pc = m_cfg.panes[i];
@@ -385,7 +492,8 @@ namespace fb {
 				case Stat::TotalPeak: sample = "0.000000"; break;
 				default: break;
 				}
-				w = std::max(list.GetOptimalColumnWidthFixed(sample), list.GetOptimalColumnWidthFixed(cols[c].first));
+				// the title is drawn in the header's font, which is usually smaller than the list's
+				w = std::max(list.GetOptimalColumnWidthFixed(sample), HeaderTextWidth(list, cols[c].first));
 			}
 			list.AddColumn(cols[c].first, w, cols[c].second ? HDF_RIGHT : HDF_LEFT, false);
 		}
@@ -511,7 +619,7 @@ namespace fb {
 				CSize sz; dc.GetTextExtent(s, s.GetLength(), &sz);
 				return sz.cx + MulDiv(extra, dpi, 96);
 			};
-			const int wSource = (items & TB_SOURCE) ? textW(m_btnSource, 28) : 0, wFilter = (items & TB_FILTER) ? textW(m_btnFilter, 28) : 0;
+			const int wSource = (items & TB_SOURCE) ? textW(m_btnSource, 40) : 0, wFilter = (items & TB_FILTER) ? textW(m_btnFilter, 40) : 0;   // + room for the drawn triangle
 			int wAction = (items & TB_ACTION) ? textW(m_btnAction, 44) : 0;
 			const int wHelp = (items & TB_HELP) ? MulDiv(26, dpi, 96) : 0;
 			const bool search = (items & TB_SEARCH) != 0;
@@ -583,7 +691,7 @@ namespace fb {
 	}
 
 	pfc::string8 CFacetBrowser::WidthKey(const PaneConfig& pc, const PaneSpec& spec, size_t col) {
-		if (col < spec.columns.size()) return spec.columns[col].name;
+		if (col < spec.columns.size()) return spec.columns[col].key;   // the name, unless several columns share it
 		const size_t s = col - spec.columns.size();
 		if (s >= pc.stats.size()) return pfc::string8();
 		if (isCustomStat(pc.stats[s])) return PFC_string_formatter() << "cstat:" << statLabel(pc.stats[s]);
@@ -707,8 +815,21 @@ namespace fb {
 		dc.FillSolidRect(rc, fill);
 		{ CBrush frame; frame.CreateSolidBrush(LineColor()); CRect f = rc; for (int k = 0; k < m_border; ++k) { dc.FrameRect(f, frame); f.DeflateRect(1, 1); } }
 
+		// down-pointing triangle, drawn rather than a "▾" character (fonts without it, e.g. under Wine, show a box)
+		const int dpi = QueryScreenDPI(*this);
+		const int triH = std::max(2, MulDiv(3, dpi, 96));
+		auto triangle = [&](int cx, int cy) {
+			POINT tri[3] = { { cx - triH, cy - triH / 2 }, { cx + triH + 1, cy - triH / 2 }, { cx, cy + triH / 2 + 1 } };
+			CBrush tb; tb.CreateSolidBrush(disabled ? mixColor(bg, tx, 45) : tx);
+			CPen tp; tp.CreatePen(PS_SOLID, 1, disabled ? mixColor(bg, tx, 45) : tx);
+			HBRUSH ob = dc.SelectBrush(tb); HPEN op = dc.SelectPen(tp);
+			dc.Polygon(tri, 3);
+			dc.SelectBrush(ob); dc.SelectPen(op);
+		};
+
 		CRect textRc = rc;
 		const bool split = from == m_btnAction;
+		const bool drop = from == m_btnSource || from == m_btnFilter;
 		if (split) {
 			BUTTON_SPLITINFO si = {}; si.mask = BCSIF_SIZE;
 			int splitW = MulDiv(16, QueryScreenDPI(*this), 96);
@@ -716,15 +837,7 @@ namespace fb {
 			CRect arrowRc(rc.right - splitW, rc.top, rc.right, rc.bottom);
 			if (bstate & BST_DROPDOWNPUSHED) { CRect a = arrowRc; a.DeflateRect(m_border, m_border); dc.FillSolidRect(a, mixColor(bg, tx, dark ? 16 : 14)); }
 			dc.FillSolidRect(CRect(arrowRc.left, rc.top + m_border, arrowRc.left + m_border, rc.bottom - m_border), LineColor());
-			// down-pointing triangle
-			const int cx = (arrowRc.left + arrowRc.right) / 2, cy = (rc.top + rc.bottom) / 2;
-			const int h = std::max(2, MulDiv(3, QueryScreenDPI(*this), 96));
-			POINT tri[3] = { { cx - h, cy - h / 2 }, { cx + h + 1, cy - h / 2 }, { cx, cy + h / 2 + 1 } };
-			CBrush tb; tb.CreateSolidBrush(disabled ? mixColor(bg, tx, 45) : tx);
-			CPen tp; tp.CreatePen(PS_SOLID, 1, disabled ? mixColor(bg, tx, 45) : tx);
-			HBRUSH ob = dc.SelectBrush(tb); HPEN op = dc.SelectPen(tp);
-			dc.Polygon(tri, 3);
-			dc.SelectBrush(ob); dc.SelectPen(op);
+			triangle((arrowRc.left + arrowRc.right) / 2, (rc.top + rc.bottom) / 2);
 			textRc.right = arrowRc.left;
 		}
 
@@ -732,7 +845,19 @@ namespace fb {
 		HFONT old = dc.SelectFont(btn.GetFont());
 		dc.SetBkMode(TRANSPARENT);
 		dc.SetTextColor(disabled ? mixColor(bg, tx, 45) : tx);
-		dc.DrawText(text, text.GetLength(), textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+		if (drop) {
+			// label and triangle centred together: "Library ▾"
+			const int gap = MulDiv(5, dpi, 96), triW = 2 * triH + 1;
+			CSize sz; dc.GetTextExtent(text, text.GetLength(), &sz);
+			const int avail = textRc.Width() - 2 * m_border - gap - triW;
+			const int textW = std::min<int>(sz.cx, std::max(0, avail));
+			const int left = textRc.left + (textRc.Width() - (textW + gap + triW)) / 2;
+			CRect t(left, textRc.top, left + textW, textRc.bottom);
+			dc.DrawText(text, text.GetLength(), t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+			triangle(t.right + gap + triH, (rc.top + rc.bottom) / 2);
+		} else {
+			dc.DrawText(text, text.GetLength(), textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+		}
 		dc.SelectFont(old);
 		if ((st & CDIS_FOCUS) && !(btn.SendMessage(WM_QUERYUISTATE) & UISF_HIDEFOCUS)) {
 			CRect f = rc; f.DeflateRect(3, 3); dc.SetTextColor(tx); dc.DrawFocusRect(f);
@@ -768,15 +893,14 @@ namespace fb {
 
 	// ================================================================ toolbar
 
-	static const wchar_t* const kDrop = L" ▾";   // small down triangle
-
 	void CFacetBrowser::UpdateToolbarText() {
+		// the drop-down triangle after these labels is drawn by OnButtonCustomDraw
 		const char* src = m_cfg.source == Source::Playlist ? "Playlist" : m_cfg.source == Source::Automatic ? "Automatic" : "Library";
-		m_btnSource.SetWindowText(pfc::stringcvt::string_wide_from_utf8(PFC_string_formatter() << src) + CString(kDrop));
+		m_btnSource.SetWindowText(pfc::stringcvt::string_wide_from_utf8(src));
 		pfc::string8 filt = "Filter";
 		if (m_cfg.filters.size() == 1) filt = m_cfg.filters[0];
 		else if (m_cfg.filters.size() > 1) filt = PFC_string_formatter() << m_cfg.filters.size() << " filters";
-		m_btnFilter.SetWindowText(pfc::stringcvt::string_wide_from_utf8(filt) + CString(kDrop));
+		m_btnFilter.SetWindowText(pfc::stringcvt::string_wide_from_utf8(filt));
 		m_btnAction.SetWindowText(pfc::stringcvt::string_wide_from_utf8(actionName(m_cfg.action)));
 		if (m_hWnd) Layout();
 	}
@@ -1045,33 +1169,56 @@ namespace fb {
 	}
 
 	void CFacetBrowser::Cascade(size_t from, bool regroupFirst) {
+		// 1. In order: each pane's tracks (the previous pane's output), the selection that still
+		//    exists in them, and the tracks it passes on. Cheap, and all that panes depend on.
+		std::vector<size_t> regrouped;
 		for (size_t i = from; i < m_panes.size(); ++i) {
 			auto& p = m_panes[i];
 			const auto& pc = m_cfg.panes[i];
 			const bool regroup = !(i == from && !regroupFirst);
 			if (regroup) {
 				p.input = (i == 0) ? m_model.allTracks() : m_panes[i - 1].output;
-				p.items = m_model.group(i, p.input);
-				p.total = m_model.totals(i, p.input);
+				regrouped.push_back(i);
 			}
 			std::vector<uint32_t> ids;
 			std::vector<pfc::string8> keep;
-			for (auto& key : p.selected) {
-				uint32_t id;
-				if (!m_model.findValue(i, key, id)) continue;
-				for (auto& it : p.items) if (it.valueId == id) { ids.push_back(id); keep.push_back(key); break; }
+			if (!p.selected.empty()) {
+				std::vector<char> present;
+				if (regroup) present = m_model.presentValues(i, p.input);
+				for (auto& key : p.selected) {
+					uint32_t id;
+					if (!m_model.findValue(i, key, id)) continue;
+					bool there = false;
+					if (regroup) there = id < present.size() && present[id];
+					else for (auto& it : p.items) if (it.valueId == id) { there = true; break; }
+					if (there) { ids.push_back(id); keep.push_back(key); }
+				}
 			}
 			p.selected = keep;
 			p.output = ids.empty() ? p.input : m_model.filter(i, p.input, ids, pc.andLogic);
-			if (regroup) {
-				const bool wantSub = paneUsesStat(pc, Stat::Subitems);
-				if (wantSub) m_model.computeSubitems(i, p.input, p.items);
-				m_model.sortItems(i, p.items, pc.sortColumn, pc.stats, pc.sortDescending, pc.sortStat);
-				if (wantSub) { p.total.subitems = 0; }
-				RefreshPaneUI(i);
-			}
 		}
-		// subitems of a pane depend on the next pane's values, which only change with regrouping above
+		// 2. The expensive part, grouping, statistics and sorting, is independent per pane: run the
+		//    panes in parallel (it only reads the model).
+		auto work = [this](size_t i) {
+			auto& p = m_panes[i];
+			const auto& pc = m_cfg.panes[i];
+			p.items = m_model.group(i, p.input);
+			p.total = m_model.totals(i, p.input);
+			// subitems of a pane depend on the next pane's values, which only change with regrouping
+			const bool wantSub = paneUsesStat(pc, Stat::Subitems);
+			if (wantSub) m_model.computeSubitems(i, p.input, p.items);
+			m_model.sortItems(i, p.items, pc.sortColumn, pc.stats, pc.sortDescending, pc.sortStat);
+			if (wantSub) p.total.subitems = 0;
+			CountDistinct(i);
+		};
+		if (!regrouped.empty()) {
+			std::vector<std::thread> threads;
+			for (size_t k = 1; k < regrouped.size(); ++k) threads.emplace_back(work, regrouped[k]);
+			work(regrouped[0]);
+			for (auto& t : threads) t.join();
+		}
+		// 3. Windows are only touched from this (the UI) thread.
+		for (size_t i : regrouped) RefreshPaneUI(i);
 	}
 
 	size_t CFacetBrowser::RowCount(size_t pane) const {
@@ -1251,13 +1398,36 @@ namespace fb {
 
 	// ================================================================ cells
 
-	pfc::string8 CFacetBrowser::SummaryLabel(size_t i) const {
+	// "All (N <column name>s)". Like Facets, every key column has its own label, counting the distinct
+	// values in that column (two titles can share one sorting key, so the counts can differ).
+	pfc::string8 CFacetBrowser::SummaryLabel(size_t i, size_t col) const {
 		const auto& p = m_panes[i];
-		pfc::string8 noun = p.spec.columns.empty() ? pfc::string8("item") : p.spec.columns[0].name;
+		pfc::string8 noun = col < p.spec.columns.size() ? p.spec.columns[col].name : pfc::string8("item");
+		const size_t n = col < p.distinct.size() ? p.distinct[col] : p.items.size();
 		pfc::string8 lower;
 		for (const char* c = noun.c_str(); *c; ++c) lower.add_byte((char)tolower((unsigned char)*c));
-		return PFC_string_formatter() << "All (" << p.items.size() << " " << lower << (p.items.size() == 1 ? "" : "s") << ")";
+		const bool plural = n != 1 && !(lower.length() > 0 && lower[lower.length() - 1] == 's');   // "letters", not "letterss"
+		return PFC_string_formatter() << "All (" << n << " " << lower << (plural ? "s" : "") << ")";
 	}
+
+	void CFacetBrowser::CountDistinct(size_t i) {
+		auto& p = m_panes[i];
+		p.distinct.clear();
+		const size_t keys = p.spec.columns.size();
+		if (keys < 2) return;   // one column: the number of rows
+		p.distinct.resize(keys);
+		std::unordered_set<std::string_view> seen;
+		seen.reserve(p.items.size());
+		for (size_t c = 0; c < keys; ++c) {
+			seen.clear();
+			for (auto& it : p.items) {
+				const auto& parts = m_model.valueParts(i, it.valueId);
+				seen.insert(c < parts.size() ? std::string_view(parts[c].c_str(), parts[c].length()) : std::string_view());
+			}
+			p.distinct[c] = seen.size();
+		}
+	}
+
 
 	pfc::string8 CFacetBrowser::CellText(size_t i, size_t row, size_t col) const {
 		const auto& p = m_panes[i];
@@ -1267,7 +1437,7 @@ namespace fb {
 		const FacetItem* it = summary ? &p.total : RowItem(i, row);
 		if (!it) return "";
 		if (col < keys) {
-			if (summary) return col == 0 ? SummaryLabel(i) : pfc::string8();
+			if (summary) return SummaryLabel(i, col);
 			const auto& parts = m_model.valueParts(i, it->valueId);
 			return col < parts.size() ? parts[col] : pfc::string8();
 		}
@@ -1351,14 +1521,15 @@ namespace fb {
 
 	void CFacetBrowser::BuildHeaderMenu(size_t i, CMenu& menu, CMenuDescriptionHybrid& desc) {
 		const auto& pc = m_cfg.panes[i];
-		auto has = [&](const char* name) { return std::find(pc.columns.begin(), pc.columns.end(), pfc::string8(name)) != pc.columns.end(); };
+		auto has = [&](const pfc::string8& key) { return std::find(pc.columns.begin(), pc.columns.end(), key) != pc.columns.end(); };
 		auto cols = getColumns();
 
 		CMenu mCols; mCols.CreatePopupMenu();
 		for (size_t c = 0; c <= cols.size(); ++c) {
 			const char* name = c < cols.size() ? cols[c].name.c_str() : kFolderColumn;
+			const pfc::string8 key = c < cols.size() ? columnKey(cols, c) : pfc::string8(kFolderColumn);   // same-named columns stay apart
 			mCols.AppendMenu(MF_STRING, CMD_COLUMN + (UINT)c, pfc::stringcvt::string_wide_from_utf8(name));
-			if (has(name)) {
+			if (has(key)) {
 				if (pc.columns.size() > 1 || !pc.columns.empty()) {
 					if (pc.columns.size() > 1) mCols.CheckMenuItem(CMD_COLUMN + (UINT)c, MF_CHECKED);
 					else mCols.CheckMenuRadioItem(CMD_COLUMN + (UINT)c, CMD_COLUMN + (UINT)c, CMD_COLUMN + (UINT)c, MF_BYCOMMAND);
@@ -1399,8 +1570,9 @@ namespace fb {
 			const size_t keys = pc.columns.size();
 			UINT current = 0;
 			for (size_t c = 0; c < keys; ++c) {
-				mSort.AppendMenu(MF_STRING, CMD_SORT_COL + (UINT)c, pfc::stringcvt::string_wide_from_utf8(pc.columns[c]));
-				desc.Set(CMD_SORT_COL + (UINT)c, PFC_string_formatter() << "Sorts this pane by \"" << pc.columns[c] << "\".");
+				const pfc::string8 name = columnKeyName(pc.columns[c]);
+				mSort.AppendMenu(MF_STRING, CMD_SORT_COL + (UINT)c, pfc::stringcvt::string_wide_from_utf8(name));
+				desc.Set(CMD_SORT_COL + (UINT)c, PFC_string_formatter() << "Sorts this pane by \"" << name << "\".");
 			}
 			auto statCmd = [](uint32_t s) { return isCustomStat(s) ? CMD_SORT_CSTAT + (UINT)(s - kCustomStatBase) : CMD_SORT_STAT + (UINT)s; };
 			if (pc.sortStat >= 0) current = statCmd((uint32_t)pc.sortStat);
@@ -1471,12 +1643,12 @@ namespace fb {
 		};
 		if (cmd >= CMD_COLUMN && cmd <= CMD_COLUMN + (int)cols.size()) {
 			size_t c = (size_t)(cmd - CMD_COLUMN);
-			pfc::string8 name = c < cols.size() ? cols[c].name : pfc::string8(kFolderColumn);
-			auto it = std::find(pc.columns.begin(), pc.columns.end(), name);
+			const pfc::string8 key = c < cols.size() ? columnKey(cols, c) : pfc::string8(kFolderColumn);
+			auto it = std::find(pc.columns.begin(), pc.columns.end(), key);
 			if (pc.columns.size() > 1) {   // multiple columns: toggle
-				if (it != pc.columns.end()) pc.columns.erase(it); else pc.columns.push_back(name);
+				if (it != pc.columns.end()) pc.columns.erase(it); else pc.columns.push_back(key);
 			} else {
-				pc.columns.assign(1, name);
+				pc.columns.assign(1, key);
 			}
 			keepSort();
 		} else if (cmd == CMD_COL_MULTI) {
@@ -1484,8 +1656,8 @@ namespace fb {
 			else {
 				// switch on multiple columns by adding the next column after the current one
 				pfc::string8 next = kFolderColumn;
-				for (size_t c = 0; c < cols.size(); ++c) if (cols[c].name == pc.columns[0] && c + 1 < cols.size()) next = cols[c + 1].name;
-				if (next == pc.columns[0]) next = cols.empty() ? pfc::string8(kFolderColumn) : cols[0].name;
+				for (size_t c = 0; c < cols.size(); ++c) if (columnKey(cols, c) == pc.columns[0] && c + 1 < cols.size()) next = columnKey(cols, c + 1);
+				if (next == pc.columns[0]) next = cols.empty() ? pfc::string8(kFolderColumn) : columnKey(cols, 0);
 				pc.columns.push_back(next);
 			}
 			keepSort();
@@ -1584,33 +1756,7 @@ namespace fb {
 			menu.AppendMenu(MF_STRING | (playback_control::get()->is_playing() ? 0 : MF_GRAYED), CMD_SHOW_PLAYING, L"Show now playing");
 			desc.Set(CMD_SHOW_PLAYING, "Selects the playing track in the panes.");
 			menu.AppendMenu(MF_SEPARATOR);
-			BuildHeaderMenu(i, menu, desc);
-			menu.AppendMenu(MF_SEPARATOR);
-			CMenu mLogic; mLogic.CreatePopupMenu();
-			mLogic.AppendMenu(MF_STRING, CMD_LOGIC_OR, L"OR (default)");
-			mLogic.AppendMenu(MF_STRING, CMD_LOGIC_AND, L"AND");
-			mLogic.CheckMenuRadioItem(CMD_LOGIC_OR, CMD_LOGIC_AND, m_cfg.panes[i].andLogic ? CMD_LOGIC_AND : CMD_LOGIC_OR, MF_BYCOMMAND);
-			desc.Set(CMD_LOGIC_OR, "Toggles OR selection logic.");
-			desc.Set(CMD_LOGIC_AND, "Toggles AND selection logic.");
-			menu.AppendMenu(MF_POPUP, (UINT_PTR)mLogic.Detach(), L"Selection logic");
-			CMenu mPane; mPane.CreatePopupMenu();
-			mPane.AppendMenu(MF_STRING, CMD_PANE_INSERT, L"Insert new pane");
-			mPane.AppendMenu(MF_STRING, CMD_PANE_APPEND, L"Append new pane");
-			mPane.AppendMenu(MF_STRING | (m_panes.size() > 1 ? 0 : MF_GRAYED), CMD_PANE_REMOVE, L"Remove pane");
-			mPane.AppendMenu(MF_SEPARATOR);
-			mPane.AppendMenu(MF_STRING | (m_panes.size() > 1 ? 0 : MF_GRAYED), CMD_PANE_CUT, L"Cut pane\tCtrl+X");
-			mPane.AppendMenu(MF_STRING, CMD_PANE_COPY, L"Copy pane\tCtrl+C");
-			mPane.AppendMenu(MF_STRING, CMD_PANE_PASTE, L"Paste pane\tCtrl+V");
-			desc.Set(CMD_PANE_INSERT, "Inserts a new pane before the selected one.");
-			desc.Set(CMD_PANE_APPEND, "Inserts a new pane after the selected one.");
-			desc.Set(CMD_PANE_REMOVE, "Removes the selected pane");
-			desc.Set(CMD_PANE_CUT, "Copies this pane to Windows Clipboard and removes it.");
-			desc.Set(CMD_PANE_COPY, "Copies the selected pane to Windows Clipboard.");
-			desc.Set(CMD_PANE_PASTE, "Inserts pane from Windows Clipboard before this one. Hold Shift to insert after it.");
-			menu.AppendMenu(MF_POPUP, (UINT_PTR)mPane.Detach(), L"Pane");
-			menu.AppendMenu(MF_SEPARATOR);
-			menu.AppendMenu(MF_STRING | (m_cfg.showToolbar ? MF_CHECKED : 0), CMD_SHOW_TOOLBAR, L"Show toolbar");
-			desc.Set(CMD_SHOW_TOOLBAR, "Shows or hides the toolbar.");
+			BuildPaneOptions(i, menu, desc);
 		} else {
 			// items get foobar2000's own track commands only
 			if (tracks.get_count()) {
@@ -1626,6 +1772,43 @@ namespace fb {
 		if (cmd <= 0) return;
 		if (cmd >= CMD_CONTEXT) { if (cm.is_valid()) cm->execute_by_id(cmd - CMD_CONTEXT); return; }
 		if (cmd >= CMD_ACTION && cmd < CMD_ACTION + (int)Action::Count) { RunAction((Action)(cmd - CMD_ACTION), tracks, i); return; }
+		RunPaneCommand(i, cmd);
+	}
+
+	// Columns / Statistics / Sort by / Display, Selection logic, Pane and Show toolbar: the pane's
+	// options, on the column header menu and (in layout editing mode) in foobar2000's own menu.
+	void CFacetBrowser::BuildPaneOptions(size_t i, CMenu& menu, CMenuDescriptionHybrid& desc) {
+		BuildHeaderMenu(i, menu, desc);
+		menu.AppendMenu(MF_SEPARATOR);
+		CMenu mLogic; mLogic.CreatePopupMenu();
+		mLogic.AppendMenu(MF_STRING, CMD_LOGIC_OR, L"OR (default)");
+		mLogic.AppendMenu(MF_STRING, CMD_LOGIC_AND, L"AND");
+		mLogic.CheckMenuRadioItem(CMD_LOGIC_OR, CMD_LOGIC_AND, m_cfg.panes[i].andLogic ? CMD_LOGIC_AND : CMD_LOGIC_OR, MF_BYCOMMAND);
+		desc.Set(CMD_LOGIC_OR, "Toggles OR selection logic.");
+		desc.Set(CMD_LOGIC_AND, "Toggles AND selection logic.");
+		menu.AppendMenu(MF_POPUP, (UINT_PTR)mLogic.Detach(), L"Selection logic");
+		CMenu mPane; mPane.CreatePopupMenu();
+		mPane.AppendMenu(MF_STRING, CMD_PANE_INSERT, L"Insert new pane");
+		mPane.AppendMenu(MF_STRING, CMD_PANE_APPEND, L"Append new pane");
+		mPane.AppendMenu(MF_STRING | (m_panes.size() > 1 ? 0 : MF_GRAYED), CMD_PANE_REMOVE, L"Remove pane");
+		mPane.AppendMenu(MF_SEPARATOR);
+		mPane.AppendMenu(MF_STRING | (m_panes.size() > 1 ? 0 : MF_GRAYED), CMD_PANE_CUT, L"Cut pane\tCtrl+X");
+		mPane.AppendMenu(MF_STRING, CMD_PANE_COPY, L"Copy pane\tCtrl+C");
+		mPane.AppendMenu(MF_STRING, CMD_PANE_PASTE, L"Paste pane\tCtrl+V");
+		desc.Set(CMD_PANE_INSERT, "Inserts a new pane before the selected one.");
+		desc.Set(CMD_PANE_APPEND, "Inserts a new pane after the selected one.");
+		desc.Set(CMD_PANE_REMOVE, "Removes the selected pane");
+		desc.Set(CMD_PANE_CUT, "Copies this pane to Windows Clipboard and removes it.");
+		desc.Set(CMD_PANE_COPY, "Copies the selected pane to Windows Clipboard.");
+		desc.Set(CMD_PANE_PASTE, "Inserts pane from Windows Clipboard before this one. Hold Shift to insert after it.");
+		menu.AppendMenu(MF_POPUP, (UINT_PTR)mPane.Detach(), L"Pane");
+		menu.AppendMenu(MF_SEPARATOR);
+		menu.AppendMenu(MF_STRING | (m_cfg.showToolbar ? MF_CHECKED : 0), CMD_SHOW_TOOLBAR, L"Show toolbar");
+		desc.Set(CMD_SHOW_TOOLBAR, "Shows or hides the toolbar.");
+	}
+
+	void CFacetBrowser::RunPaneCommand(size_t i, int cmd) {
+		if (i >= m_panes.size()) return;
 		switch (cmd) {
 		case CMD_LOGIC_OR: case CMD_LOGIC_AND:
 			m_cfg.panes[i].andLogic = (cmd == CMD_LOGIC_AND);
@@ -1648,6 +1831,77 @@ namespace fb {
 			return;
 		}
 		if (RunHeaderCommand(i, cmd)) CreatePanesKeepSelection();
+	}
+
+	// ---------------------------------------------------------------- layout editing mode
+	// In layout editing mode (always on in a scratchbox) right-clicks go to foobar2000's own layout
+	// menu. Like Facets, the pane under the mouse adds its options to that menu, so Facet Browser can
+	// still be set up there.
+
+	namespace {
+		struct EditMenuDescriptions : CMenuDescriptionHybrid {
+			explicit EditMenuDescriptions(HWND w) : CMenuDescriptionHybrid(w) {}
+			bool Get(unsigned id, pfc::string_base& out) { return QueryHint(id, out); }
+		};
+
+		// copies a menu built with our own command IDs into the host's menu, offsetting every ID
+		void appendMenuWithBase(HMENU src, HMENU dst, UINT base) {
+			const int n = ::GetMenuItemCount(src);
+			for (int k = 0; k < n; ++k) {
+				wchar_t text[512] = {};
+				MENUITEMINFO mi = { sizeof(mi) };
+				mi.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_STRING | MIIM_SUBMENU;
+				mi.dwTypeData = text; mi.cch = _countof(text) - 1;
+				if (!::GetMenuItemInfo(src, (UINT)k, TRUE, &mi)) continue;
+				if (mi.hSubMenu) {
+					HMENU sub = ::CreatePopupMenu();
+					appendMenuWithBase(mi.hSubMenu, sub, base);
+					mi.hSubMenu = sub;
+				} else if (!(mi.fType & MFT_SEPARATOR)) mi.wID += base;
+				mi.dwTypeData = text;
+				::InsertMenuItem(dst, (UINT)::GetMenuItemCount(dst), TRUE, &mi);
+			}
+		}
+	}
+
+	size_t CFacetBrowser::PaneAtScreenPoint(const POINT& pt, bool fromKeyboard) const {
+		if (!m_hWnd || m_panes.empty()) return SIZE_MAX;
+		if (fromKeyboard || (pt.x == -1 && pt.y == -1)) return m_lastPane < m_panes.size() ? m_lastPane : 0;
+		CPoint local = pt; ScreenToClient(&local);
+		for (size_t i = 0; i < m_panes.size(); ++i) if (m_panes[i].rect.PtInRect(local)) return i;
+		return SIZE_MAX;
+	}
+
+	bool CFacetBrowser::edit_mode_context_menu_test(const POINT& pt, bool fromKeyboard) {
+		return PaneAtScreenPoint(pt, fromKeyboard) != SIZE_MAX;
+	}
+
+	void CFacetBrowser::edit_mode_context_menu_build(const POINT& pt, bool fromKeyboard, HMENU menu, unsigned idBase) {
+		const size_t i = PaneAtScreenPoint(pt, fromKeyboard);
+		if (i == SIZE_MAX) return;
+		m_editPane = m_lastPane = i;
+		auto desc = std::make_unique<EditMenuDescriptions>(*this);
+		CMenu ours; ours.CreatePopupMenu();
+		BuildPaneOptions(i, ours, *desc);
+		// a separator between foobar2000's items and ours, unless its part already ends with one
+		if (const int count = ::GetMenuItemCount(menu); count > 0) {
+			MENUITEMINFO last = { sizeof(last) };
+			last.fMask = MIIM_FTYPE;
+			if (!::GetMenuItemInfo(menu, (UINT)(count - 1), TRUE, &last) || !(last.fType & MFT_SEPARATOR)) ::AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
+		}
+		appendMenuWithBase(ours, menu, idBase);
+		m_editDesc = std::move(desc);
+	}
+
+	void CFacetBrowser::edit_mode_context_menu_command(const POINT&, bool, unsigned id, unsigned idBase) {
+		m_editDesc.reset();
+		if (id < idBase) return;
+		RunPaneCommand(m_editPane, (int)(id - idBase));
+	}
+
+	bool CFacetBrowser::edit_mode_context_menu_get_description(unsigned id, unsigned idBase, pfc::string_base& out) {
+		if (!m_editDesc || id < idBase) return false;
+		return static_cast<EditMenuDescriptions*>(m_editDesc.get())->Get(id - idBase, out);
 	}
 
 	// ================================================================ panes

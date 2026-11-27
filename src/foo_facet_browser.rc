@@ -38,8 +38,8 @@ BEGIN
 END
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,3,0
- PRODUCTVERSION 1,0,3,0
+ FILEVERSION 1,1,0,0
+ PRODUCTVERSION 1,1,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -52,12 +52,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Faris Aljanubi"
             VALUE "FileDescription", "Facet Browser - foobar2000 component"
-            VALUE "FileVersion", "1.0.3"
+            VALUE "FileVersion", "1.1.0"
             VALUE "InternalName", "foo_facet_browser"
             VALUE "LegalCopyright", "\xa9 2026 Faris Aljanubi"
             VALUE "OriginalFilename", "foo_facet_browser.dll"
             VALUE "ProductName", "Facet Browser"
-            VALUE "ProductVersion", "1.0.3"
+            VALUE "ProductVersion", "1.1.0"
         END
     END
     BLOCK "VarFileInfo"

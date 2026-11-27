@@ -119,7 +119,9 @@ namespace fb {
 	// (custom statistics) a Combine drop-down.
 	struct ListEditor {
 		std::vector<Entry> items;
-		std::vector<pfc::string8> origin;   // per item: its name when last saved, empty for new items
+		std::vector<pfc::string8> origin;   // per item: its name (columns: key) when last saved, empty for new items
+		std::vector<pfc::string8> removed;  // columns: keys of saved items removed since the last save
+		bool keyed = false;                 // columns: panes refer to them by key (see columnKey)
 		CListBox list;
 		CWindow nameEdit, valueEdit, btnRemove, btnUp, btnDown;
 		CComboBox combine;                  // null unless custom statistics
@@ -176,21 +178,43 @@ namespace fb {
 		void Remove() {
 			int i = list.GetCurSel();
 			if (i < 0 || i >= (int)items.size()) return;
+			if (keyed && !origin[i].is_empty()) removed.push_back(origin[i]);
 			items.erase(items.begin() + i);
 			origin.erase(origin.begin() + i);
 			Fill();
 		}
+		// What panes will call each item once saved: its name, or for columns its key, counted over
+		// the columns as they are saved (unnamed ones and "Folder" are left out). Empty = not saved.
+		std::vector<pfc::string8> CurrentKeys() const {
+			std::vector<pfc::string8> out(items.size());
+			if (!keyed) { for (size_t i = 0; i < items.size(); ++i) out[i] = items[i].name; return out; }
+			std::vector<ColumnDef> saved;
+			std::vector<size_t> at;
+			for (size_t i = 0; i < items.size(); ++i)
+				if (!items[i].name.is_empty() && items[i].name != kFolderColumn) { saved.push_back({ items[i].name, items[i].value }); at.push_back(i); }
+			for (size_t k = 0; k < saved.size(); ++k) out[at[k]] = columnKey(saved, k);
+			return out;
+		}
 		void Load(const std::vector<Entry>& v, bool saved) {
 			items = v;
-			origin.clear();
-			for (auto& it : items) origin.push_back(saved ? it.name : pfc::string8());
+			removed.clear();
+			origin = saved ? CurrentKeys() : std::vector<pfc::string8>(items.size());
 		}
-		// Saved items whose name changed (old -> new); then the current names count as saved.
+		// Saved items whose name (key) changed, old -> new; then the current ones count as saved.
+		// Columns also report removed ones (new key kRemovedKey, which never matches), because with
+		// several same-named columns a removal renumbers the others and a later one takes its key.
 		RenameList TakeRenames() {
+			static const char* const kRemovedKey = "\t-";
 			RenameList out;
-			for (size_t i = 0; i < items.size(); ++i)
-				if (!origin[i].is_empty() && !items[i].name.is_empty() && origin[i] != items[i].name) out.emplace_back(origin[i], items[i].name);
-			for (size_t i = 0; i < items.size(); ++i) origin[i] = items[i].name;
+			const auto keys = CurrentKeys();
+			for (size_t i = 0; i < items.size(); ++i) {
+				if (origin[i].is_empty() || origin[i] == keys[i]) continue;
+				if (!keys[i].is_empty()) out.emplace_back(origin[i], keys[i]);
+				else if (keyed) out.emplace_back(origin[i], kRemovedKey);
+			}
+			for (auto& r : removed) out.emplace_back(r, kRemovedKey);
+			removed.clear();
+			origin = keys;
 			return out;
 		}
 		void Move(int delta) {
@@ -291,6 +315,7 @@ namespace fb {
 			setText(this->GetDlgItem(IDC_LBL_VALUE), valueLabel);
 			setText(this->GetDlgItem(IDC_HELP_LIST), help);
 			m_ed.list = this->GetDlgItem(IDC_LIST);
+			m_ed.keyed = (Kind == kColumns);
 			m_ed.nameEdit = this->GetDlgItem(IDC_NAME); m_ed.valueEdit = this->GetDlgItem(IDC_VALUE);
 			m_ed.btnRemove = this->GetDlgItem(IDC_REMOVE); m_ed.btnUp = this->GetDlgItem(IDC_UP); m_ed.btnDown = this->GetDlgItem(IDC_DOWN);
 			CComboBox combo(this->GetDlgItem(IDC_COMBINE));

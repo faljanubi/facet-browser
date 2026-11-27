@@ -1,6 +1,6 @@
 # Facet Browser for foobar2000
 
-**Version 1.0.3** · Created by **Faris Aljanubi** · Licence: [GPL-3.0](LICENSE) · **[Documentation](https://faljanubi.github.io/facet-browser/)**
+**Version 1.1.0** · Created by **Faris Aljanubi** · Licence: [GPL-3.0](LICENSE) · **[Documentation](https://faljanubi.github.io/facet-browser/)**
 
 ![Facet Browser in foobar2000's dark mode](docs/screenshots/dark.png)
 
@@ -21,6 +21,7 @@ and colour scheme. It is an independent reimplementation and contains no code fr
 - **Columns** (right-click a pane header › *Columns*): Genre, Album artist, Artist, Date, Album,
   Track, Title, Filename, Filename.ext, Folder, or *Multiple columns* side by side. Column
   definitions are title formatting, edited in *Preferences › Media Library › Facet Browser › Columns*.
+  Several columns may share a name (e.g. three *A-Z* columns), as in Facets.
   `%<field>%` gives one entry per value of a multi-value tag. `A|B` lists every track under the
   value of `A` *and* under the value of `B` (e.g. an initial letter or decade next to each artist
   or year), and the Default UI markers `<dim>` and `>highlight<` are shown as in the playlist view.

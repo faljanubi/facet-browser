@@ -93,8 +93,9 @@ namespace fb {
 		return out;
 	}
 
-	// Folder names of a track's location, relative to the Media Library folder when possible.
-	static std::vector<pfc::string8> folderParts(library_manager::ptr lib, const metadb_handle_ptr& h) {
+	// A track's location relative to the Media Library folder when possible (what the Folder
+	// columns count from), file name included.
+	static pfc::string8 relativeLocation(library_manager::ptr lib, const metadb_handle_ptr& h) {
 		pfc::string8 rel;
 		bool ok = false;
 		try { ok = lib->get_relative_path(h, rel); } catch (...) {}
@@ -105,18 +106,27 @@ namespace fb {
 			const char* colon = strstr(rel.c_str(), ":\\");
 			if (colon) rel = colon + 2;
 		}
-		std::vector<pfc::string8> parts;
-		const char* s = rel.c_str();
-		const char* start = s;
-		for (const char* c = s;; ++c) {
-			if (*c == '\\' || *c == '/' || *c == 0) {
-				if (c > start) parts.emplace_back(start, c - start);
-				if (*c == 0) break;
-				start = c + 1;
-			}
-		}
-		if (!parts.empty()) parts.pop_back();   // the file name itself
-		return parts;
+		return rel;
+	}
+
+	// The depth-th folder (1-based) of a folder path: false when the track sits above that level.
+	// deeper: there are folders below it. Empty segments ("\\\\") are skipped.
+	static bool folderAt(const char* s, uint32_t depth, const char*& outStart, size_t& outLen, bool& deeper) {
+		const char* p = s;
+		auto next = [&](const char*& st, size_t& len) {
+			while (*p == '\\' || *p == '/') ++p;
+			if (!*p) return false;
+			st = p;
+			while (*p && *p != '\\' && *p != '/') ++p;
+			len = (size_t)(p - st);
+			return true;
+		};
+		const char* st = nullptr; size_t len = 0;
+		for (uint32_t k = 1; k <= depth; ++k) if (!next(st, len)) return false;
+		outStart = st; outLen = len;
+		const char* st2; size_t len2;
+		deeper = next(st2, len2);
+		return true;
 	}
 
 	pfc::string8 folderPrefix(const metadb_handle_ptr& h, uint32_t depth) {
@@ -190,12 +200,17 @@ namespace fb {
 	}
 
 	uint32_t FacetModel::intern(PaneValues& p, const std::vector<pfc::string8>& parts) {
-		pfc::string8 key;
-		for (size_t i = 0; i < parts.size(); ++i) { if (i) key.add_byte(kPartSep); key << parts[i]; }
-		auto it = p.lookup.find(key.c_str());
+		std::string key;
+		for (size_t i = 0; i < parts.size(); ++i) { if (i) key.push_back(kPartSep); key.append(parts[i].c_str(), parts[i].length()); }
+		auto it = p.lookup.find(key);
 		if (it != p.lookup.end()) return it->second;
+		return internNew(p, key, parts);
+	}
+
+	// A value not seen before in this pane (key: its parts joined with kPartSep).
+	uint32_t FacetModel::internNew(PaneValues& p, const std::string& key, const std::vector<pfc::string8>& parts) {
 		uint32_t id = (uint32_t)p.names.size();
-		p.names.push_back(key);
+		p.names.push_back(pfc::string8(key.c_str(), key.length()));
 		p.parts.push_back(parts);
 		std::vector<std::wstring> sk;
 		for (size_t i = 0; i < parts.size(); ++i) {
@@ -203,7 +218,7 @@ namespace fb {
 			sk.push_back(std::wstring(pfc::stringcvt::string_wide_from_utf8(strip ? stripMarkers(parts[i]) : parts[i]).get_ptr()));
 		}
 		p.sortKeys.push_back(std::move(sk));
-		p.lookup.emplace(key.c_str(), id);
+		p.lookup.emplace(key, id);
 		return id;
 	}
 
@@ -230,17 +245,16 @@ namespace fb {
 		return buf;
 	}
 
-	bool FacetModel::build(metadb_handle_list_cref tracks, const std::vector<PaneSpec>& panes, bool wantCreated, const std::vector<StatDef>& customs, pfc::string8& error) {
+	// One script per non-folder column of the panes marked in `which` (all when empty).
+	bool FacetModel::compileColumns(const std::vector<PaneSpec>& panes, const std::vector<char>& which, std::vector<ColumnJob>& cols, bool& anyFolder, pfc::string8& error) {
 		auto compiler = titleformat_compiler::get();
-		// one script per non-folder column
-		struct Col { size_t pane, column; titleformat_object::ptr script; };
-		std::vector<Col> cols;
-		bool anyFolder = false;
+		anyFolder = false;
 		for (size_t p = 0; p < panes.size(); ++p) {
+			if (!which.empty() && !which[p]) continue;
 			for (size_t c = 0; c < panes[p].columns.size(); ++c) {
 				const auto& cs = panes[p].columns[c];
 				if (cs.folder) { anyFolder = true; continue; }
-				Col col{ p, c };
+				ColumnJob col{ p, c };
 				if (!compiler->compile(col.script, expandMultiValue(cs.pattern))) {
 					error = PFC_string_formatter() << "The pattern of column \"" << cs.name << "\" has an error: " << cs.pattern;
 					return false;
@@ -248,6 +262,144 @@ namespace fb {
 				cols.push_back(col);
 			}
 		}
+		return true;
+	}
+
+	// Folder locations of every track, kept so panes can be rebuilt without asking the library again.
+	void FacetModel::ensureLocations() {
+		if (m_locationsReady) return;
+		auto lib = library_manager::get();
+		const size_t n = m_tracks.get_count();
+		m_folderOf.assign(n, 0);
+		m_folders.clear();
+		std::unordered_map<std::string, uint32_t> lookup;
+		for (size_t t = 0; t < n; ++t) {
+			const pfc::string8 rel = relativeLocation(lib, m_tracks[t]);
+			// the folder part: everything before the file name
+			size_t cut = 0;
+			for (size_t i = 0; i < rel.length(); ++i) if (rel[i] == '\\' || rel[i] == '/') cut = i;
+			std::string dir(rel.c_str(), cut);
+			auto it = lookup.find(dir);
+			if (it == lookup.end()) {
+				it = lookup.emplace(dir, (uint32_t)m_folders.size()).first;
+				m_folders.push_back(pfc::string8(dir.c_str(), dir.length()));
+			}
+			m_folderOf[t] = it->second;
+		}
+		m_locationsReady = true;
+	}
+
+	// Builds the values of the given panes, each on its own thread (they share nothing but read-only
+	// input). raw[k] holds column job k's formatted text per track.
+	void FacetModel::buildPanes(const std::vector<PaneSpec>& panes, const std::vector<size_t>& which, const std::vector<ColumnJob>& cols, const std::vector<std::vector<pfc::string8>>& raw) {
+		auto one = [&](size_t p) {
+			std::vector<const std::vector<pfc::string8>*> byColumn(panes[p].columns.size(), nullptr);
+			for (size_t k = 0; k < cols.size(); ++k) if (cols[k].pane == p) byColumn[cols[k].column] = &raw[k];
+			buildPane(p, panes[p], byColumn);
+		};
+		if (which.empty()) return;
+		std::vector<std::thread> threads;
+		for (size_t k = 1; k < which.size(); ++k) threads.emplace_back(one, which[k]);
+		one(which[0]);
+		for (auto& t : threads) t.join();
+	}
+
+	void FacetModel::buildPane(size_t p, const PaneSpec& spec, const std::vector<const std::vector<pfc::string8>*>& byColumn) {
+		auto& pv = m_panes[p];
+		pv = PaneValues();
+		const size_t n = m_tracks.get_count();
+		const size_t nc = spec.columns.size();
+		pv.offsets.resize(n + 1);
+		pv.deeper.assign(n, 0);
+		for (auto& cs : spec.columns) pv.markers.push_back(cs.markers ? 1 : 0);
+		std::vector<const char*> one(nc);
+		std::vector<size_t> oneLen(nc);
+		std::string key;
+		std::vector<pfc::string8> parts(nc);
+		for (size_t t = 0; t < n; ++t) {
+			pv.offsets[t] = (uint32_t)pv.ids.size();
+			bool missing = false, multi = false;
+			for (size_t c = 0; c < nc && !missing; ++c) {
+				const auto& cs = spec.columns[c];
+				if (cs.folder) {
+					bool deeper = false;
+					if (!folderAt(m_folders[m_folderOf[t]], cs.depth, one[c], oneLen[c], deeper)) missing = true;   // track sits above this folder level
+					else if (deeper) pv.deeper[t] = 1;
+				} else {
+					const pfc::string8& r = (*byColumn[c])[t];
+					if (strchr(r.c_str(), kValueSep)) multi = true;
+					one[c] = r.c_str(); oneLen[c] = r.length();
+				}
+			}
+			if (missing) continue;
+			if (!multi) {
+				// the common case: one value per column, so exactly one item
+				key.clear();
+				for (size_t c = 0; c < nc; ++c) { if (c) key.push_back(kPartSep); key.append(one[c], oneLen[c]); }
+				auto it = pv.lookup.find(key);
+				uint32_t id;
+				if (it != pv.lookup.end()) id = it->second;
+				else {
+					for (size_t c = 0; c < nc; ++c) parts[c].set_string(one[c], oneLen[c]);
+					id = internNew(pv, key, parts);
+				}
+				pv.ids.push_back(id);
+				continue;
+			}
+			// multi-value columns: the cartesian product of the values (capped to keep pathological tags in check)
+			std::vector<std::vector<pfc::string8>> perCol(nc);
+			for (size_t c = 0; c < nc; ++c) {
+				if (spec.columns[c].folder) perCol[c].emplace_back(one[c], oneLen[c]);
+				else {
+					perCol[c] = splitValues((*byColumn[c])[t]);
+					if (perCol[c].empty()) perCol[c].push_back("");
+				}
+			}
+			std::vector<std::vector<pfc::string8>> combos(1);
+			for (auto& vals : perCol) {
+				std::vector<std::vector<pfc::string8>> next;
+				for (auto& base : combos) for (auto& v : vals) {
+					if (next.size() >= 64) break;
+					auto x = base; x.push_back(v); next.push_back(std::move(x));
+				}
+				combos.swap(next);
+			}
+			for (auto& combo : combos) {
+				uint32_t id = intern(pv, combo);
+				bool dup = false;
+				for (size_t k = pv.offsets[t]; k < pv.ids.size(); ++k) if (pv.ids[k] == id) { dup = true; break; }
+				if (!dup) pv.ids.push_back(id);
+			}
+		}
+		pv.offsets[n] = (uint32_t)pv.ids.size();
+	}
+
+	bool FacetModel::rebuildPanes(const std::vector<PaneSpec>& panes, const std::vector<char>& changed, pfc::string8& error) {
+		if (panes.size() != m_panes.size() || changed.size() != panes.size()) return false;
+		std::vector<ColumnJob> cols;
+		bool anyFolder = false;
+		if (!compileColumns(panes, changed, cols, anyFolder, error)) return false;
+		const size_t n = m_tracks.get_count();
+		std::vector<std::vector<pfc::string8>> raw(cols.size(), std::vector<pfc::string8>(n));
+		if (!cols.empty()) {
+			auto db = metadb_v2::get();
+			db->queryMultiParallel_(m_tracks, [&](size_t idx, const metadb_v2::rec_t& rec) {
+				for (size_t k = 0; k < cols.size(); ++k)
+					db->formatTitle_v2(m_tracks[idx], rec, nullptr, raw[k][idx], cols[k].script, nullptr);
+			});
+		}
+		if (anyFolder) ensureLocations();
+		std::vector<size_t> which;
+		for (size_t p = 0; p < panes.size(); ++p) if (changed[p]) which.push_back(p);
+		buildPanes(panes, which, cols, raw);
+		return true;
+	}
+
+	bool FacetModel::build(metadb_handle_list_cref tracks, const std::vector<PaneSpec>& panes, bool wantCreated, const std::vector<StatDef>& customs, pfc::string8& error) {
+		auto compiler = titleformat_compiler::get();
+		std::vector<ColumnJob> cols;
+		bool anyFolder = false;
+		if (!compileColumns(panes, std::vector<char>(), cols, anyFolder, error)) return false;
 		titleformat_object::ptr infoScript;
 		{
 			pfc::string8 s;
@@ -292,63 +444,29 @@ namespace fb {
 			}
 		});
 
-		std::vector<std::vector<pfc::string8>> folders;
-		if (anyFolder) {
-			auto lib = library_manager::get();
-			folders.resize(n);
-			for (size_t t = 0; t < n; ++t) folders[t] = folderParts(lib, tracks[t]);
-		}
+		m_folderOf.clear();
+		m_folders.clear();
+		m_locationsReady = false;
+		if (anyFolder) ensureLocations();
 
-		// per pane: values of each column, then the cartesian product for multi-value columns
 		m_panes.assign(panes.size(), PaneValues());
-		for (size_t p = 0; p < panes.size(); ++p) {
-			auto& pv = m_panes[p];
-			const auto& spec = panes[p];
-			pv.offsets.resize(n + 1);
-			pv.deeper.assign(n, 0);
-			for (auto& cs : spec.columns) pv.markers.push_back(cs.markers ? 1 : 0);
-			// map column -> index in cols
-			std::vector<int> colIndex(spec.columns.size(), -1);
-			for (size_t k = 0; k < cols.size(); ++k) if (cols[k].pane == p) colIndex[cols[k].column] = (int)k;
-			for (size_t t = 0; t < n; ++t) {
-				pv.offsets[t] = (uint32_t)pv.ids.size();
-				std::vector<std::vector<pfc::string8>> perCol(spec.columns.size());
-				bool missing = false;
-				for (size_t c = 0; c < spec.columns.size(); ++c) {
-					const auto& cs = spec.columns[c];
-					if (cs.folder) {
-						const auto& f = folders[t];
-						if (f.size() >= cs.depth) {
-							perCol[c].push_back(f[cs.depth - 1]);
-							if (f.size() > cs.depth) pv.deeper[t] = 1;
-						} else missing = true;   // track sits above this folder level
-					} else {
-						perCol[c] = splitValues(raw[colIndex[c]][t]);
-						if (perCol[c].empty()) perCol[c].push_back("");
-					}
-				}
-				if (missing) continue;
-				// cartesian product (capped to keep pathological tags in check)
-				std::vector<std::vector<pfc::string8>> combos(1);
-				for (auto& vals : perCol) {
-					std::vector<std::vector<pfc::string8>> next;
-					for (auto& base : combos) for (auto& v : vals) {
-						if (next.size() >= 64) break;
-						auto x = base; x.push_back(v); next.push_back(std::move(x));
-					}
-					combos.swap(next);
-				}
-				for (auto& combo : combos) {
-					uint32_t id = intern(pv, combo);
-					bool dup = false;
-					for (size_t k = pv.offsets[t]; k < pv.ids.size(); ++k) if (pv.ids[k] == id) { dup = true; break; }
-					if (!dup) pv.ids.push_back(id);
-				}
-			}
-			pv.offsets[n] = (uint32_t)pv.ids.size();
-		}
+		std::vector<size_t> all(panes.size());
+		for (size_t p = 0; p < panes.size(); ++p) all[p] = p;
+		buildPanes(panes, all, cols, raw);
 
 		m_info.assign(n, TrackInfo());
+		m_text.assign(1, pfc::string8());
+		std::unordered_map<std::string, uint32_t> textIds;
+		auto textId = [&](const char* v, size_t len) -> uint32_t {
+			if (len == 0) return 0;
+			std::string key(v, len);
+			auto it = textIds.find(key);
+			if (it != textIds.end()) return it->second;
+			const uint32_t id = (uint32_t)m_text.size();
+			m_text.push_back(pfc::string8(v, len));
+			textIds.emplace(std::move(key), id);
+			return id;
+		};
 		for (size_t t = 0; t < n; ++t) {
 			std::vector<pfc::string8> f;
 			const char* s = rawInfo[t].c_str();
@@ -361,25 +479,30 @@ namespace fb {
 			ti.length = atof(f[0]);
 			ti.size = _strtoui64(f[1], nullptr, 10);
 			ti.bitrate = (uint32_t)strtoul(f[2], nullptr, 10);
-			ti.added = f[3]; ti.firstPlayed = f[4]; ti.lastPlayed = f[5]; ti.date = f[6]; ti.modified = f[7];
+			ti.added = textId(f[3], f[3].length()); ti.firstPlayed = textId(f[4], f[4].length()); ti.lastPlayed = textId(f[5], f[5].length());
+			ti.date = textId(f[6], f[6].length()); ti.modified = textId(f[7], f[7].length());
 			ti.plays = (uint32_t)strtoul(f[8], nullptr, 10);
 			ti.rating = (uint32_t)strtoul(f[9], nullptr, 10);
 			ti.lossless = pfc::stringEqualsI_ascii(f[10], "lossless");
 			ti.peak = f[11].is_empty() ? -1 : atof(f[11]);
 		}
-		if (wantCreated) for (size_t t = 0; t < n; ++t) m_info[t].created = formatFileTime(created[t]);
+		if (wantCreated) for (size_t t = 0; t < n; ++t) { const pfc::string8 c = formatFileTime(created[t]); m_info[t].created = textId(c, c.length()); }
 		return true;
 	}
 
 	void FacetModel::accumulate(FacetItem& it, uint32_t t) const {
 		const auto& ti = m_info[t];
-		auto minStr = [&](int32_t& slot, const pfc::string8& v, const pfc::string8 TrackInfo::* field) {
-			if (v.is_empty()) return;
-			if (slot < 0 || strcmp(v, m_info[slot].*field) < 0) slot = (int32_t)t;
+		auto minStr = [&](int32_t& slot, uint32_t v, uint32_t TrackInfo::* field) {
+			if (v == 0) return;
+			if (slot < 0) { slot = (int32_t)t; return; }
+			const uint32_t cur = m_info[slot].*field;
+			if (v != cur && strcmp(text(v), text(cur)) < 0) slot = (int32_t)t;
 		};
-		auto maxStr = [&](int32_t& slot, const pfc::string8& v, const pfc::string8 TrackInfo::* field) {
-			if (v.is_empty()) return;
-			if (slot < 0 || strcmp(v, m_info[slot].*field) > 0) slot = (int32_t)t;
+		auto maxStr = [&](int32_t& slot, uint32_t v, uint32_t TrackInfo::* field) {
+			if (v == 0) return;
+			if (slot < 0) { slot = (int32_t)t; return; }
+			const uint32_t cur = m_info[slot].*field;
+			if (v != cur && strcmp(text(v), text(cur)) > 0) slot = (int32_t)t;
 		};
 		it.count++;
 		it.duration += ti.length;
@@ -484,7 +607,7 @@ namespace fb {
 			}
 			return 0;
 		};
-		auto strOf = [&](int32_t idx, const pfc::string8 TrackInfo::* f) -> const char* { return idx < 0 ? "" : (m_info[idx].*f).c_str(); };
+		auto strOf = [&](int32_t idx, uint32_t TrackInfo::* f) -> const char* { return idx < 0 ? "" : text(m_info[idx].*f); };
 		auto byStat = [&](const FacetItem& a, const FacetItem& b, Stat s) -> int {
 			auto num = [](double x, double y) { return x < y ? -1 : x > y ? 1 : 0; };
 			if (isCustomStat((uint32_t)s)) {
@@ -546,6 +669,13 @@ namespace fb {
 		return out;
 	}
 
+	std::vector<char> FacetModel::presentValues(size_t pane, const std::vector<uint32_t>& input) const {
+		const auto& pv = m_panes[pane];
+		std::vector<char> present(pv.names.size(), 0);
+		for (uint32_t t : input) for (uint32_t k = pv.offsets[t]; k < pv.offsets[t + 1]; ++k) present[pv.ids[k]] = 1;
+		return present;
+	}
+
 	bool FacetModel::findValue(size_t pane, const char* key, uint32_t& out) const {
 		const auto& pv = m_panes[pane];
 		auto it = pv.lookup.find(key);
@@ -555,7 +685,7 @@ namespace fb {
 	}
 
 	pfc::string8 FacetModel::statText(Stat s, const FacetItem& it, size_t rowIndex) const {
-		auto str = [&](int32_t idx, const pfc::string8 TrackInfo::* f) -> pfc::string8 { return idx < 0 ? pfc::string8() : m_info[idx].*f; };
+		auto str = [&](int32_t idx, uint32_t TrackInfo::* f) -> pfc::string8 { return idx < 0 ? pfc::string8() : pfc::string8(text(m_info[idx].*f)); };
 		char buf[64];
 		if (isCustomStat((uint32_t)s)) {
 			double v;

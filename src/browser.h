@@ -78,6 +78,11 @@ namespace fb {
 		void set_configuration(ui_element_config::ptr cfg) override;
 		ui_element_config::ptr get_configuration() override { return makeConfig(m_cfg); }
 		void notify(const GUID& what, t_size p1, const void* p2, t_size p2size) override;
+		// layout editing mode (scratchbox): the pane's options in foobar2000's layout menu
+		bool edit_mode_context_menu_test(const POINT& pt, bool fromKeyboard) override;
+		void edit_mode_context_menu_build(const POINT& pt, bool fromKeyboard, HMENU menu, unsigned idBase) override;
+		void edit_mode_context_menu_command(const POINT& pt, bool fromKeyboard, unsigned id, unsigned idBase) override;
+		bool edit_mode_context_menu_get_description(unsigned id, unsigned idBase, pfc::string_base& out) override;
 
 		// Selects the playing track's entries pane by pane (item menu command).
 		bool ShowNowPlaying();
@@ -154,6 +159,7 @@ namespace fb {
 			PaneSpec spec;
 			std::vector<FacetItem> items;
 			FacetItem total;
+			std::vector<size_t> distinct;          // per key column: distinct values (only when a pane has several)
 			std::vector<uint32_t> input, output;
 			std::vector<pfc::string8> selected;   // value keys; empty = everything
 			CRect rect;
@@ -254,7 +260,10 @@ namespace fb {
 		bool IsSummaryRow(size_t pane, size_t row) const;
 		const FacetItem* RowItem(size_t pane, size_t row) const;
 		pfc::string8 CellText(size_t pane, size_t row, size_t col) const;
-		pfc::string8 SummaryLabel(size_t pane) const;
+		pfc::string8 RowKey(size_t pane, size_t row) const;
+		std::unordered_map<std::string, size_t> RowsByKey(size_t pane) const;
+		pfc::string8 SummaryLabel(size_t pane, size_t col) const;
+		void CountDistinct(size_t pane);
 		std::vector<pfc::string8> ArtLines(size_t pane, size_t row);
 		metadb_handle_ptr ArtTrack(size_t pane, size_t row);
 
@@ -262,6 +271,9 @@ namespace fb {
 		void ShowPaneMenu(size_t pane, CWindow wnd, CPoint pt, bool onHeader);
 		void BuildHeaderMenu(size_t pane, CMenu& menu, CMenuDescriptionHybrid& desc);
 		bool RunHeaderCommand(size_t pane, int cmd);
+		void BuildPaneOptions(size_t pane, CMenu& menu, CMenuDescriptionHybrid& desc);
+		void RunPaneCommand(size_t pane, int cmd);
+		size_t PaneAtScreenPoint(const POINT& pt, bool fromKeyboard) const;
 
 		// panes
 		void InsertPane(size_t at, const PaneConfig& p);
@@ -322,6 +334,8 @@ namespace fb {
 		CBrush m_editBrush;
 		pfc::string8 m_error;
 		size_t m_lastPane = 0;
+		size_t m_editPane = 0;                               // pane of the open layout-editing menu
+		std::unique_ptr<CMenuDescriptionHybrid> m_editDesc;  // its status bar descriptions
 		bool m_updating = false;
 		bool m_sending = false;
 		int m_drag = -1;

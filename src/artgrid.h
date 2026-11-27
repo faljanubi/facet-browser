@@ -48,6 +48,10 @@ namespace fb {
 			MSG_WM_SETFOCUS(OnSetFocus)
 			MSG_WM_KILLFOCUS(OnKillFocus)
 			MSG_WM_TIMER(OnTimer)
+			MSG_WM_MOUSEMOVE(OnMouseMove)
+			MSG_WM_MOUSEHOVER(OnMouseHover)
+			MSG_WM_MOUSELEAVE(OnMouseLeave)
+			NOTIFY_CODE_HANDLER_EX(TTN_GETDISPINFO, OnTipGetDispInfo)
 			NOTIFY_CODE_HANDLER_EX(HDN_ITEMCLICK, OnHeaderClick)
 			NOTIFY_CODE_HANDLER_EX(NM_CUSTOMDRAW, OnHeaderCustomDraw)
 			MESSAGE_HANDLER_EX(WM_ART_LOADED, OnArtLoaded)
@@ -59,7 +63,7 @@ namespace fb {
 		void SetMode(Display d) { m_mode = d; Relayout(); }
 		void SetArtType(ArtType t);
 		void SetArtScale(uint32_t percent);   // album art size, percent of the default
-		void ColorsChanged() { Invalidate(); if (m_header.m_hWnd) m_header.Invalidate(); }
+		void ColorsChanged();
 		void SetColumns(const std::vector<std::pair<pfc::string8, bool>>& cols, int sortColumn, bool descending);   // title, right-aligned
 		CHeaderCtrl GetHeader() const { return m_header; }
 		std::function<bool(CPoint)> isSplitterZone;   // screen point is on/next to a pane divider
@@ -69,15 +73,29 @@ namespace fb {
 		bool IsSelected(size_t idx) const { return idx < m_sel.size() && m_sel[idx]; }
 		void EnsureVisible(size_t idx);
 
+		// When the panes are rebuilt (another pane's columns changed), the new grid takes over the
+		// covers already loaded and the scroll position, instead of starting at the top and loading
+		// everything again. Items are identified by the host; indices here are this grid's items.
+		struct CoverItem { size_t first; HBITMAP second; };   // index, bitmap
+		struct Covers { std::vector<CoverItem> items; int artSize = 0; GUID artType = {}; };
+		Covers DetachCovers();                     // takes the loaded covers out (this grid no longer owns them)
+		void AdoptCovers(const Covers& c);         // indices already mapped to this grid's items; frees the rest
+		static void FreeCovers(const Covers& c);   // when no grid takes them
+		int FirstVisibleItem() const;              // -1 when empty
+		void ScrollToItem(size_t idx);             // its row at the top
+
 	private:
 		void FitHeader();
+		std::vector<std::pair<pfc::string8, bool>> m_columns;   // for re-measuring the header when its font changes
+		int m_sortColumn = -1; bool m_sortDescending = false;
 		enum { WM_ART_LOADED = WM_APP + 41 };
-		// After a resize the covers on screen are drawn scaled; they are decoded again at the new
-		// size once the size has stopped changing for a moment.
-		enum { TIMER_RERENDER = 1 };
-		void OnTimer(UINT_PTR id);
-		void Rerender();
-		int FirstVisibleItem() const;
+		void OnTimer(UINT_PTR) { SetMsgHandled(FALSE); }
+		// Art size changed: the covers on screen are read again and decoded at the new size at once
+		// (several in parallel) before the next repaint, so they go from sharp to sharp; the others
+		// follow in the background. Nothing extra is kept in memory for this.
+		void ResizeNow();
+		bool m_holdResize = false;   // SetArtScale: resize after restoring the scroll position
+		struct Job { size_t first; metadb_handle_ptr second; };
 		struct Result { uint32_t generation; size_t index; HBITMAP bmp; };
 
 		int OnCreate(LPCREATESTRUCT);
@@ -99,6 +117,19 @@ namespace fb {
 		LRESULT OnHeaderClick(LPNMHDR hdr);
 		LRESULT OnHeaderCustomDraw(LPNMHDR hdr);
 		LRESULT OnArtLoaded(UINT, WPARAM, LPARAM);
+
+		// Tooltip with the full text of a label line cut off with "...", shown in place over the line
+		// (like the list panes' tooltips from libPPUI).
+		void OnMouseMove(UINT flags, CPoint pt);
+		void OnMouseHover(WPARAM flags, CPoint pt);
+		void OnMouseLeave() { TipRemove(); }
+		LRESULT OnTipGetDispInfo(LPNMHDR hdr);
+		void TipRemove();
+		CRect LabelRect(const CRect& item, const CRect& art, size_t lines, UINT& align) const;
+		CToolTipCtrl m_tip;
+		TOOLINFO m_tipInfo = {};
+		CRect m_tipRect;                      // screen coordinates of the line it covers; empty = hidden
+		std::wstring m_tipText;
 
 		void Relayout();
 		CRect ContentRect() const;            // client area below the header
@@ -136,7 +167,7 @@ namespace fb {
 		std::thread m_thread;
 		std::mutex m_mutex;
 		std::condition_variable m_cv;
-		std::vector<std::pair<size_t, metadb_handle_ptr>> m_queue;
+		std::vector<Job> m_queue;
 		std::atomic<uint32_t> m_generation{ 0 };
 		bool m_stop = false;
 		int m_workerArt = 120;

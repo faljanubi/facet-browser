@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.1.0 (2026-11-27)
+
+Settings from 1.0.3 carry over.
+
+### New
+
+- Several columns can have the same name, as in Facets (e.g. three *A-Z* columns for albums,
+  artists and titles). Panes and the *Columns* menu keep them apart, also when columns are
+  reordered, renamed or removed in Preferences
+- Layout editing mode and scratchboxes: right-clicking a pane adds its options (*Columns*,
+  *Statistics*, *Sort by*, *Display*, *Selection logic*, *Pane*, *Show toolbar*) to
+  foobar2000's layout menu, so Facet Browser can be set up there
+- Album art views show a tooltip with the full name when a label is cut off
+
+### Changed
+
+- Much faster when a pane's columns change on large libraries: only the panes that changed
+  are read again, the others and all statistics are kept, and panes are grouped in parallel.
+  With 230,000 tracks a column change takes about 0.15 s instead of about 1 s, and selecting
+  an item updates the other panes about four times faster
+- Uses about 30% less memory with large libraries (about 350 MB instead of 510 MB with
+  230,000 tracks)
+- The summary item shows its *All (n ...)* label in every column of a multi-column pane, each
+  counting that column's own values, so it stays visible when the first column is hidden
+- Album art views load the covers on screen first; covers scrolled past are no longer loaded
+  before them
+- Labels under album art are centred, as in Facets
+
+### Fixed
+
+- Statistic columns were wider than needed: their title was measured with the list's font
+  instead of the header's smaller one
+- The drop-down arrows on the Source and Filter buttons showed as boxes under Wine; they are
+  now drawn instead of using a text character
+- A column removed in Preferences stayed behind in panes as a hidden placeholder: *Multiple
+  columns* stayed ticked and sorting by a statistic could pick the column next to it
+- Summary item labels no longer double a final "s" ("All (19 letters)", not "letterss")
+- Changing one pane's columns, statistics or display no longer sends the other panes back to the
+  top: they keep their scroll position, and album art panes keep the covers already loaded
+  instead of loading them all again
+- In album art panes the column header cut off statistic titles in narrow panes; each title now
+  gets the room it needs
+- Changing the album art size (Ctrl+mouse wheel, Larger/Smaller art) no longer shows the covers
+  stretched and then sharpening a moment later: the covers on screen are redrawn sharp at the
+  new size right away
 ## 1.0.3 (2026-11-26)
 
 Settings from 1.0.2 carry over.

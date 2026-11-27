@@ -22,6 +22,8 @@ definitions shown in *header menu › Columns*.
 - Select a column to edit its **Name** and **Pattern**.
 - **Add new** creates a column, **Remove** deletes the selected one.
 - If you rename a column, panes that use it switch to the new name automatically.
+- Several columns may have the same name. Panes keep them apart, also when you reorder,
+  rename or remove them.
 
 The **pattern** is foobar2000
 [title formatting](https://wiki.hydrogenaud.io/index.php?title=Foobar2000:Title_Formatting_Reference).

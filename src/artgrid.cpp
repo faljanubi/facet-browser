@@ -31,7 +31,10 @@ namespace fb {
 		return 0;
 	}
 
-	void CArtGrid::OnDestroy() { StopWorker(); }
+	void CArtGrid::OnDestroy() {
+		StopWorker();
+		if (m_tip.m_hWnd) m_tip.DestroyWindow();
+	}
 
 	COLORREF CArtGrid::Color(int sysIdx) const {
 		auto cb = m_host->artCallback();
@@ -46,6 +49,7 @@ namespace fb {
 	void CArtGrid::SetHeaderFont(HFONT f) {
 		// Same font as the column headers of the list panes, so all headers line up.
 		if (m_header.m_hWnd) m_header.SetFont(f);
+		if (!m_columns.empty()) { auto cols = m_columns; SetColumns(cols, m_sortColumn, m_sortDescending); }   // titles measured in this font
 		Relayout();
 	}
 
@@ -64,8 +68,54 @@ namespace fb {
 		// keep the first visible item at the top while the size changes
 		const int anchor = m_hWnd ? FirstVisibleItem() : -1;
 		m_scale = percent;
+		m_holdResize = true;   // decode the covers that are on screen once the scroll position is final
 		Relayout();
 		if (anchor >= 0) ScrollTo(ItemRect((size_t)anchor).top);
+		m_holdResize = false;
+		if (m_hWnd && m_workerArt != m_art) ResizeNow();
+	}
+
+	void CArtGrid::ScrollToItem(size_t idx) {
+		if (idx >= m_host->artCount()) return;
+		const CRect t = ItemRect(idx);
+		ScrollTo(idx < (size_t)std::max(1, m_cols) ? 0 : t.top);   // first row: the very top, margin included
+	}
+
+	CArtGrid::Covers CArtGrid::DetachCovers() {
+		Covers c;
+		c.artSize = m_workerArt;
+		c.artType = artGuid(m_artType);
+		for (size_t i = 0; i < m_cache.size(); ++i) {
+			if (!m_cache[i]) continue;
+			c.items.push_back({ i, m_cache[i] });
+			m_cache[i] = NULL;   // owned by the caller now
+		}
+		return c;
+	}
+
+	void CArtGrid::FreeCovers(const Covers& c) {
+		for (auto& e : c.items) if (e.second && e.second != kNoArt) DeleteObject(e.second);
+	}
+
+	void CArtGrid::AdoptCovers(const Covers& c) {
+		const bool sameType = c.artType == artGuid(m_artType);
+		std::vector<char> adopted(m_cache.size(), 0);
+		for (auto& e : c.items) {
+			const size_t i = e.first;
+			if (sameType && i < m_cache.size() && !m_cache[i]) {
+				m_cache[i] = e.second;
+				m_requested[i] = 1;
+				adopted[i] = 1;
+			} else if (e.second && e.second != kNoArt) DeleteObject(e.second);
+		}
+		{
+			// covers just handed over don't need the decode Reload() may have queued for them
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(), [&](const Job& q) { return q.first < adopted.size() && adopted[q.first]; }), m_queue.end());
+		}
+		// decoded for another art size: decode the ones on screen again at this size
+		if (sameType && c.artSize != m_workerArt) ResizeNow();
+		Invalidate();
 	}
 
 	int CArtGrid::FirstVisibleItem() const {
@@ -76,10 +126,15 @@ namespace fb {
 	}
 
 	void CArtGrid::SetColumns(const std::vector<std::pair<pfc::string8, bool>>& cols, int sortColumn, bool descending) {
+		m_columns = cols; m_sortColumn = sortColumn; m_sortDescending = descending;
 		if (!m_header.m_hWnd) return;
 		while (m_header.GetItemCount() > 0) m_header.DeleteItem(0);
 		const int dpi = QueryScreenDPI(*this);
-		const int statW = MulDiv(90, dpi, 96);
+		// Statistic titles only label the sort (their values are in the captions), so each gets just
+		// the room its title needs; a fixed width cut off the last title in narrow panes.
+		CClientDC dc(m_header);
+		HFONT hf = m_header.GetFont();
+		HFONT oldFont = dc.SelectFont(hf ? hf : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
 		const int n = (int)cols.size();
 		for (int i = 0; i < n; ++i) {
 			pfc::stringcvt::string_wide_from_utf8 title(cols[i].first);
@@ -88,9 +143,11 @@ namespace fb {
 			item.pszText = const_cast<wchar_t*>(title.get_ptr());
 			item.fmt = (cols[i].second ? HDF_RIGHT : HDF_LEFT) | HDF_STRING;
 			if (i == sortColumn) item.fmt |= descending ? HDF_SORTDOWN : HDF_SORTUP;
-			item.cxy = cols[i].second ? statW : 60;
+			CSize sz; dc.GetTextExtent(title, (int)wcslen(title), &sz);
+			item.cxy = cols[i].second ? std::max<int>(sz.cx + MulDiv(14, dpi, 96), MulDiv(40, dpi, 96)) : 60;
 			m_header.InsertItem(i, &item);
 		}
+		dc.SelectFont(oldFont);
 		FitHeader();
 	}
 
@@ -209,35 +266,73 @@ namespace fb {
 		m_scrollY = std::max(0, std::min(m_scrollY, std::max(0, m_contentH - content.Height())));
 		si.nPos = m_scrollY;
 		SetScrollInfo(SB_VERT, &si, TRUE);
-		if (m_workerArt != m_art) {
-			// size changed: new covers are decoded at the new size; the ones already shown are drawn
-			// scaled until the size settles, then decoded again sharply (no flashing placeholders)
-			{
-				std::lock_guard<std::mutex> lock(m_mutex);
-				m_workerArt = m_art;
-			}
-			SetTimer(TIMER_RERENDER, 250);
-		}
+		if (m_workerArt != m_art && !m_holdResize) ResizeNow();   // art size changed
 		QueueVisible();
 		Invalidate();
 	}
 
-	void CArtGrid::OnTimer(UINT_PTR id) {
-		if (id != TIMER_RERENDER) { SetMsgHandled(FALSE); return; }
-		KillTimer(id);
-		Rerender();
-	}
+	static HBITMAP decodeScaled(IWICImagingFactory* wic, const void* data, size_t size, int box);
 
-	void CArtGrid::Rerender() {
+	void CArtGrid::ResizeNow() {
+		GUID artId;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_queue.clear();
-			++m_generation;
+			++m_generation;      // results still on their way are for the old size
+			m_workerArt = m_art;
+			artId = m_workerArtId;
 		}
-		// keep the current bitmaps on screen; each is replaced when its sharp version arrives
+		const size_t n = std::min(m_cache.size(), m_host->artCount());
+		const CRect content = ContentRect();
+		const int viewTop = m_scrollY, viewBottom = m_scrollY + content.Height();
+		// the covers on screen: read again and decoded at the new size now, several at a time
+		std::vector<size_t> now;
+		std::vector<metadb_handle_ptr> tracks;
+		for (size_t i = 0; i < n; ++i) {
+			if (!m_cache[i] || m_cache[i] == kNoArt) continue;
+			const CRect t = ItemRect(i);
+			if (t.bottom < viewTop || t.top > viewBottom) continue;
+			auto h = m_host->artTrack(i);
+			if (h.is_empty()) continue;
+			now.push_back(i);
+			tracks.push_back(h);
+		}
+		std::vector<HBITMAP> fresh(now.size(), NULL);
+		if (!now.empty()) {
+			const int box = m_art;
+			const size_t threads = std::min<size_t>(now.size(), std::max(1u, std::min(8u, std::thread::hardware_concurrency())));
+			std::atomic<size_t> next{ 0 };
+			auto run = [&] {
+				const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+				{
+					CComPtr<IWICImagingFactory> wic;
+					wic.CoCreateInstance(CLSID_WICImagingFactory);
+					for (size_t k; wic && (k = next++) < now.size();) {
+						try {
+							abort_callback_dummy abort;
+							auto inst = album_art_manager_v2::get()->open(pfc::list_single_ref_t<metadb_handle_ptr>(tracks[k]), pfc::list_single_ref_t<GUID>(artId), abort);
+							auto data = inst->query(artId, abort);
+							if (data.is_valid()) fresh[k] = decodeScaled(wic, data->get_ptr(), data->get_size(), box);
+						} catch (...) {}
+					}
+				}
+				if (SUCCEEDED(hr)) CoUninitialize();
+			};
+			std::vector<std::thread> pool;
+			for (size_t t = 0; t < threads; ++t) pool.emplace_back(run);
+			for (auto& t : pool) t.join();
+		}
 		m_requested.assign(m_cache.size(), 0);
+		for (size_t k = 0; k < now.size(); ++k) {
+			if (!fresh[k]) continue;
+			DeleteObject(m_cache[now[k]]);
+			m_cache[now[k]] = fresh[k];
+			m_requested[now[k]] = 1;
+		}
+		// the rest keep their bitmap as a stand-in until the background decode replaces it
 		for (size_t i = 0; i < m_cache.size(); ++i) if (m_cache[i] == kNoArt) m_requested[i] = 1;   // still no art
 		QueueVisible();
+		Invalidate();
 	}
 
 	CRect CArtGrid::ItemRect(size_t idx) const {
@@ -266,6 +361,7 @@ namespace fb {
 	}
 
 	void CArtGrid::ScrollTo(int y) {
+		TipRemove();
 		CRect content = ContentRect();
 		y = std::max(0, std::min(y, std::max(0, m_contentH - content.Height())));
 		if (y == m_scrollY) return;
@@ -300,6 +396,7 @@ namespace fb {
 	}
 
 	BOOL CArtGrid::OnMouseWheel(UINT flags, short delta, CPoint) {
+		TipRemove();
 		if (flags & MK_CONTROL) {
 			// Ctrl+wheel: album art size, one step per wheel notch
 			m_wheel += delta;
@@ -373,16 +470,8 @@ namespace fb {
 			}
 			if (m_mode != Display::ArtNone) {
 				auto lines = m_host->artLines(i);
-				CRect text;
 				UINT align;
-				if (m_mode == Display::ArtRight) {
-					text = CRect(art.right + m_gap, item.top + (item.Height() - (int)lines.size() * m_lineH) / 2, item.right - m_gap / 2, item.bottom);
-					align = DT_LEFT;
-				} else {
-					// left-aligned under the cover and as wide as it, like Library Tree
-					text = CRect(art.left, art.bottom + m_labelGap, art.right, item.bottom);
-					align = DT_LEFT;
-				}
+				const CRect text = LabelRect(item, art, lines.size(), align);
 				for (size_t l = 0; l < lines.size(); ++l) {
 					CRect r(text.left, text.top + (int)l * m_lineH, text.right, text.top + (int)(l + 1) * m_lineH);
 					dc.SetTextColor(sel ? selFg : (l == 0 ? fg : mix(bg, fg, 65)));
@@ -400,6 +489,98 @@ namespace fb {
 			auto cb = m_host->artCallback();
 			if (m_headerH > 0 && cb.is_valid() && cb->is_dark_mode()) dc.FillSolidRect(CRect(content.left, content.top, content.right, content.top + 1), RGB(0x30, 0x30, 0x30));
 		}
+	}
+
+	CRect CArtGrid::LabelRect(const CRect& item, const CRect& art, size_t lines, UINT& align) const {
+		if (m_mode == Display::ArtRight) {
+			align = DT_LEFT;
+			return CRect(art.right + m_gap, item.top + (item.Height() - (int)lines * m_lineH) / 2, item.right - m_gap / 2, item.bottom);
+		}
+		// centred under the cover and as wide as it, like Facets
+		align = DT_CENTER;
+		return CRect(art.left, art.bottom + m_labelGap, art.right, item.bottom);
+	}
+
+	// ---------------------------------------------------------------- tooltips
+
+	void CArtGrid::OnMouseMove(UINT, CPoint pt) {
+		if (!m_tipRect.IsRectEmpty()) {
+			CPoint s = pt; ClientToScreen(&s);
+			if (!m_tipRect.PtInRect(s)) TipRemove();
+		}
+		TRACKMOUSEEVENT ev = { sizeof(ev) };
+		ev.dwFlags = TME_HOVER | TME_LEAVE;
+		ev.hwndTrack = *this;
+		ev.dwHoverTime = HOVER_DEFAULT;
+		TrackMouseEvent(&ev);
+	}
+
+	void CArtGrid::OnMouseHover(WPARAM flags, CPoint pt) {
+		if (!m_tipRect.IsRectEmpty() || (flags & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON))) return;
+		if (m_mode == Display::ArtNone) return;
+		const int hit = HitTest(pt);
+		if (hit < 0) return;
+		CRect content = ContentRect();
+		CRect item = ItemRect((size_t)hit);
+		item.OffsetRect(0, content.top - m_scrollY);
+		auto lines = m_host->artLines((size_t)hit);
+		UINT align;
+		const CRect text = LabelRect(item, ArtRect(item), lines.size(), align);
+		for (size_t l = 0; l < lines.size(); ++l) {
+			CRect r(text.left, text.top + (int)l * m_lineH, text.right, text.top + (int)(l + 1) * m_lineH);
+			if (!r.PtInRect(pt)) continue;
+			pfc::stringcvt::string_wide_from_utf8 w(lines[l]);
+			CClientDC dc(*this);
+			HFONT old = dc.SelectFont(m_font ? m_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+			CSize sz; dc.GetTextExtent(w, (int)wcslen(w), &sz);
+			dc.SelectFont(old);
+			if (sz.cx <= r.Width() || wcslen(w) >= 4096) return;   // not cut off
+			if (!m_tip.m_hWnd) {
+				// TTS_NOPREFIX: an "&" in a name is shown as is, not as a mnemonic underline
+				if (!m_tip.Create(NULL, NULL, NULL, WS_POPUP | TTS_NOPREFIX, WS_EX_TRANSPARENT)) return;
+				m_tipInfo.cbSize = sizeof(m_tipInfo);
+				m_tipInfo.uFlags = TTF_TRACK | TTF_IDISHWND | TTF_ABSOLUTE | TTF_TRANSPARENT;
+				m_tipInfo.hwnd = *this;
+				m_tipInfo.uId = 0;
+				m_tipInfo.lpszText = LPSTR_TEXTCALLBACK;
+				m_tip.AddTool(&m_tipInfo);
+				auto cb = m_host->artCallback();
+				DarkMode::ApplyDarkThemeCtrl(m_tip, cb.is_valid() && cb->is_dark_mode());
+			}
+			if (m_font) m_tip.SetFont(m_font);
+			m_tipText = w.get_ptr();
+			// a cut-off line fills its whole width, so the full text starts where it does
+			CRect full = r;
+			ClientToScreen(full);
+			m_tipRect = full;
+			m_tip.TrackPosition(full.left, full.top);
+			m_tip.TrackActivate(&m_tipInfo, TRUE);
+			return;
+		}
+	}
+
+	LRESULT CArtGrid::OnTipGetDispInfo(LPNMHDR hdr) {
+		if (hdr->hwndFrom != m_tip.m_hWnd) { SetMsgHandled(FALSE); return 0; }
+		auto info = reinterpret_cast<LPNMTTDISPINFO>(hdr);
+		info->lpszText = const_cast<wchar_t*>(m_tipText.c_str());
+		info->hinst = 0;
+		info->uFlags = 0;
+		return 0;
+	}
+
+	void CArtGrid::ColorsChanged() {
+		Invalidate();
+		if (m_header.m_hWnd) m_header.Invalidate();
+		if (m_tip.m_hWnd) {   // follow a dark/light mode switch
+			auto cb = m_host->artCallback();
+			DarkMode::ApplyDarkThemeCtrl(m_tip, cb.is_valid() && cb->is_dark_mode());
+		}
+	}
+
+	void CArtGrid::TipRemove() {
+		if (m_tipRect.IsRectEmpty()) return;
+		m_tipRect.SetRectEmpty();
+		if (m_tip.m_hWnd) m_tip.TrackActivate(&m_tipInfo, FALSE);
 	}
 
 	// ---------------------------------------------------------------- selection / input
@@ -427,6 +608,7 @@ namespace fb {
 	}
 
 	void CArtGrid::OnLButtonDown(UINT flags, CPoint pt) {
+		TipRemove();
 		SetFocus();
 		int hit = HitTest(pt);
 		if (hit < 0) return;
@@ -454,6 +636,7 @@ namespace fb {
 	}
 
 	void CArtGrid::OnRButtonDown(UINT, CPoint pt) {
+		TipRemove();
 		SetFocus();
 		int hit = HitTest(pt);
 		if (hit >= 0 && !IsSelected(hit)) SelectSingle(hit);
@@ -536,6 +719,7 @@ namespace fb {
 	// ---------------------------------------------------------------- data + worker
 
 	void CArtGrid::Reload() {
+		TipRemove();
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_queue.clear();
@@ -548,7 +732,6 @@ namespace fb {
 		if (m_sel.size() != n) m_sel.assign(n, 0);
 		if (m_focus >= n) m_focus = 0;
 		if (m_hWnd) {
-			KillTimer(TIMER_RERENDER);
 			{
 				std::lock_guard<std::mutex> lock(m_mutex);
 				m_workerArt = m_art;
@@ -560,24 +743,40 @@ namespace fb {
 	void CArtGrid::QueueVisible() {
 		if (!m_hWnd) return;
 		CRect content = ContentRect();
-		const size_t n = m_host->artCount();
-		std::vector<std::pair<size_t, metadb_handle_ptr>> add;
+		const size_t n = std::min(m_host->artCount(), m_requested.size());
+		// Covers on screen load first, then the ones just above and below (prefetch). Covers that have
+		// scrolled out of that range leave the queue, so after a long scroll the visible ones don't wait
+		// for every row passed on the way, as in Facets. Covers already loaded stay cached.
+		const int viewTop = m_scrollY, viewBottom = m_scrollY + content.Height();
 		const int top = m_scrollY - content.Height() / 2, bottom = m_scrollY + content.Height() * 2;
+		auto inRange = [&](size_t i, int lo, int hi) { CRect t = ItemRect(i); return t.bottom >= lo && t.top <= hi; };
+		std::vector<Job> visible, nearby;
 		for (size_t i = 0; i < n; ++i) {
-			if (i < m_requested.size() && m_requested[i]) continue;
-			CRect t = ItemRect(i);
-			if (t.bottom < top || t.top > bottom) continue;
+			if (m_requested[i] || !inRange(i, top, bottom)) continue;
 			auto h = m_host->artTrack(i);
 			if (h.is_empty()) continue;
 			m_requested[i] = 1;
-			add.emplace_back(i, h);
+			(inRange(i, viewTop, viewBottom) ? visible : nearby).push_back({ i, h });
 		}
-		if (add.empty()) return;
+		bool changed = !visible.empty() || !nearby.empty();
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
-			for (auto& a : add) m_queue.push_back(a);
+			std::vector<Job> queue;
+			queue.reserve(m_queue.size() + visible.size() + nearby.size());
+			// order: visible (already queued, then new), then prefetch (already queued, then new);
+			// queued covers now out of range are dropped and can be asked for again later
+			std::vector<Job> queuedNearby;
+			for (auto& q : m_queue) {
+				if (q.first < n && inRange(q.first, viewTop, viewBottom)) queue.push_back(q);
+				else if (q.first < n && inRange(q.first, top, bottom)) queuedNearby.push_back(q);
+				else { if (q.first < m_requested.size()) m_requested[q.first] = 0; changed = true; }
+			}
+			for (auto& a : visible) queue.push_back(a);
+			for (auto& q : queuedNearby) queue.push_back(q);
+			for (auto& a : nearby) queue.push_back(a);
+			m_queue.swap(queue);
 		}
-		m_cv.notify_one();
+		if (changed) m_cv.notify_one();
 	}
 
 	LRESULT CArtGrid::OnArtLoaded(UINT, WPARAM, LPARAM lp) {
@@ -646,7 +845,7 @@ namespace fb {
 			CComPtr<IWICImagingFactory> wic;
 			wic.CoCreateInstance(CLSID_WICImagingFactory);
 			for (;;) {
-				std::pair<size_t, metadb_handle_ptr> job;
+				Job job;
 				uint32_t gen;
 				int box;
 				GUID id;

@@ -46,6 +46,10 @@ The Folder column also uses these folders as its starting point.
 3. Pick **Facet Browser** under *Media Library Viewers*.
 4. Turn layout editing mode off again.
 
+In layout editing mode (and in a scratchbox, which is always in that mode) right-clicking a pane
+shows foobar2000's layout menu with the pane's own options added below it: *Columns*,
+*Statistics*, *Sort by*, *Display*, *Selection logic*, *Pane* and *Show toolbar*.
+
 You can add more than one Facet Browser. Each has its own panes and toolbar settings.
 Columns, filters and the selection playlist are shared by all of them.
 

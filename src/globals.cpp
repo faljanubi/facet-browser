@@ -95,8 +95,29 @@ namespace fb {
 		cfg_columns = s.is_empty() ? "\n" : s.c_str();   // keep "no columns" distinct from "never set"
 	}
 
-	bool findColumn(const char* name, ColumnDef& out) {
-		for (auto& c : getColumns()) if (c.name == name) { out = c; return true; }
+	// Several columns may share a name (Facets allowed it, e.g. three "A-Z" columns for albums, artists
+	// and titles). Panes refer to a column by its key: the name for the first column with that name,
+	// "name<TAB>n" for the n-th one (n >= 2). Settings saved before keys existed hold plain names,
+	// which still mean the first column with that name.
+	pfc::string8 columnKey(const std::vector<ColumnDef>& cols, size_t index) {
+		if (index >= cols.size()) return pfc::string8();
+		size_t n = 1;
+		for (size_t k = 0; k < index; ++k) if (cols[k].name == cols[index].name) ++n;
+		if (n == 1) return cols[index].name;
+		pfc::string8 key = cols[index].name;
+		key.add_byte(kSep);
+		key << (unsigned)n;
+		return key;
+	}
+
+	pfc::string8 columnKeyName(const char* key) {
+		const char* tab = strchr(key, kSep);
+		return tab ? pfc::string8(key, tab - key) : pfc::string8(key);
+	}
+
+	bool findColumn(const char* key, ColumnDef& out) {
+		const auto cols = getColumns();
+		for (size_t k = 0; k < cols.size(); ++k) if (columnKey(cols, k) == key) { out = cols[k]; return true; }
 		return false;
 	}
 

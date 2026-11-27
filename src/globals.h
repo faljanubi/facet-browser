@@ -14,7 +14,10 @@ namespace fb {
 	std::vector<ColumnDef> getColumns();          // user columns (Folder is not included)
 	void setColumns(const std::vector<ColumnDef>& v);
 	std::vector<ColumnDef> defaultColumns();
-	bool findColumn(const char* name, ColumnDef& out);   // false for Folder or unknown names
+	// Column keys: how panes refer to a column, unique even when several columns share a name.
+	pfc::string8 columnKey(const std::vector<ColumnDef>& cols, size_t index);
+	pfc::string8 columnKeyName(const char* key);         // the display name of a key
+	bool findColumn(const char* key, ColumnDef& out);    // by key; false for Folder or unknown keys
 
 	std::vector<FilterDef> getFilters();
 	void setFilters(const std::vector<FilterDef>& v);

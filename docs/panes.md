@@ -36,7 +36,12 @@ You can edit these and add your own in [Preferences](preferences#columns).
 
 Normally, picking a column replaces the pane's column. Tick **Columns › Multiple columns** to
 show several columns side by side, for example *Album artist* and *Album*. The pane then lists
-each unique combination.
+each unique combination. The summary item shows its *All (n ...)* label in every column, each
+counting that column's own values, so it stays visible even when you shrink the first column to
+nothing (handy for a hidden sorting column).
+
+Several columns may share a name, for example three *A-Z* columns for albums, artists and
+titles. The *Columns* menu lists each one and keeps them apart.
 
 ### Multi-value tags
 
@@ -108,7 +113,7 @@ first. Text is sorted naturally, so *Disc 2* comes before *Disc 10*.
 | Option | Effect |
 |:--|:--|
 | **Columns** | A normal list (default) |
-| **Album art (bottom labels)** | A grid of covers with the name under each one |
+| **Album art (bottom labels)** | A grid of covers with the name centred under each one |
 | **Album art (right labels)** | Covers with the name to the right |
 | **Album art (no labels)** | Covers only |
 | **Summary item** | Show or hide the *All (n ...)* row |
@@ -116,12 +121,17 @@ first. Text is sorted naturally, so *Disc 2* comes before *Disc 10*.
 | **Larger art / Smaller art** | Album art size for this pane; Ctrl+mouse wheel over the pane does the same |
 | **Reset art size** | Back to the default size |
 
-Each pane remembers its own size. Resizing the pane keeps the covers' size, as in Facets: the
-columns reflow and the grid is centred.
+Each pane remembers its own size. Changing it redraws the covers on screen sharp at the new
+size straight away. Resizing the pane keeps the covers' size, as in Facets: the columns reflow
+and the grid is centred.
+
+Changing one pane's columns, statistics or display doesn't send the other panes back to the
+top: they keep their scroll position, and album art panes keep the covers already loaded.
 
 In album art views, use the arrow keys, Page Up / Page Down, Home and End to move,
 Ctrl / Shift to select several, and Enter or double-click to run the action. Covers load in the
-background.
+background, the ones on screen first, so after a long scroll they appear without waiting for
+the rows you scrolled past. Hover over a name cut off with "..." to see all of it.
 
 ## Selection logic
 

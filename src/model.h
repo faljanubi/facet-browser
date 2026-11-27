@@ -9,7 +9,8 @@ namespace fb {
 
 	// One column of a pane, resolved against the global definitions.
 	struct ColumnSpec {
-		pfc::string8 name;
+		pfc::string8 name;      // display name
+		pfc::string8 key;       // how the pane refers to it (columnKey; differs from name for duplicates)
 		pfc::string8 pattern;   // title formatting; unused for folder columns
 		bool folder = false;
 		bool markers = false;   // pattern writes Default UI dim/highlight markers (<dim> >highlight<)
@@ -48,6 +49,10 @@ namespace fb {
 		// wantCreated: also read file creation times from disk (only needed for the File created stat)
 		// customs: the custom statistics (getCustomStats()); ids kCustomStatBase + index refer to them
 		bool build(metadb_handle_list_cref tracks, const std::vector<PaneSpec>& panes, bool wantCreated, const std::vector<StatDef>& customs, pfc::string8& error);
+		// Same tracks, but the panes marked in `changed` have new columns: only those are formatted and
+		// regrouped; statistics and the other panes are kept. False on a pattern error (in `error`) or
+		// when the pane count differs (then use build()).
+		bool rebuildPanes(const std::vector<PaneSpec>& panes, const std::vector<char>& changed, pfc::string8& error);
 
 		size_t paneCount() const { return m_panes.size(); }
 		size_t trackCount() const { return m_tracks.get_count(); }
@@ -61,6 +66,8 @@ namespace fb {
 		// sortStat >= 0 sorts by that Stat and ignores column
 		void sortItems(size_t pane, std::vector<FacetItem>& items, int column, const std::vector<uint32_t>& stats, bool descending, int sortStat = -1) const;
 		std::vector<uint32_t> filter(size_t pane, const std::vector<uint32_t>& input, const std::vector<uint32_t>& ids, bool andLogic) const;
+		// per value id: whether any of these tracks has it in this pane
+		std::vector<char> presentValues(size_t pane, const std::vector<uint32_t>& input) const;
 		bool findValue(size_t pane, const char* key, uint32_t& out) const;
 		bool findTrack(const metadb_handle_ptr& h, uint32_t& out) const;
 		// the value ids a track has in a pane (several for multi-value and "|" columns)
@@ -80,8 +87,11 @@ namespace fb {
 			uint64_t size = 0;
 			uint32_t bitrate = 0, plays = 0, rating = 0;
 			bool lossless = false;
-			pfc::string8 added, firstPlayed, lastPlayed, date, modified, created;
+			// text statistics as ids into m_text (0 = empty); kept small for very large libraries
+			uint32_t added = 0, firstPlayed = 0, lastPlayed = 0, date = 0, modified = 0, created = 0;
 		};
+		std::vector<pfc::string8> m_text;   // the distinct texts of the track statistics; [0] = ""
+		const char* text(uint32_t id) const { return m_text[id].c_str(); }
 		struct PaneValues {
 			std::vector<pfc::string8> names;                 // value key (parts joined)
 			std::vector<std::vector<pfc::string8>> parts;    // per column
@@ -92,7 +102,19 @@ namespace fb {
 			std::vector<char> markers;                       // per column: values carry dim/highlight markers
 		};
 		uint32_t intern(PaneValues& p, const std::vector<pfc::string8>& parts);
+		uint32_t internNew(PaneValues& p, const std::string& key, const std::vector<pfc::string8>& parts);
 		void accumulate(FacetItem& it, uint32_t t) const;
+
+		struct ColumnJob { size_t pane, column; titleformat_object::ptr script; };
+		static bool compileColumns(const std::vector<PaneSpec>& panes, const std::vector<char>& which, std::vector<ColumnJob>& cols, bool& anyFolder, pfc::string8& error);
+		void ensureLocations();
+		void buildPanes(const std::vector<PaneSpec>& panes, const std::vector<size_t>& which, const std::vector<ColumnJob>& cols, const std::vector<std::vector<pfc::string8>>& raw);
+		void buildPane(size_t p, const PaneSpec& spec, const std::vector<const std::vector<pfc::string8>*>& byColumn);
+		// Folder columns: each track's folder relative to the Media Library folder, as an index into
+		// the distinct folders (tracks of an album share one entry)
+		std::vector<uint32_t> m_folderOf;
+		std::vector<pfc::string8> m_folders;
+		bool m_locationsReady = false;
 
 		std::vector<std::vector<double>> m_custom;   // [custom statistic][track], NaN = no number
 		std::vector<Combine> m_customCombine;
